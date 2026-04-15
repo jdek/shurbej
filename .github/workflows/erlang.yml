@@ -31,7 +31,7 @@ jobs:
     - name: Extract coverage percentage
       id: coverage
       run: |
-        PERCENT=$(rebar3 cover 2>&1 | grep -oP 'Total:\s+\K[0-9]+')
+        PERCENT=$(rebar3 cover 2>&1 | sed -n 's/.*total[^0-9]*\([0-9]\+\)%.*/\1/p')
         echo "percent=${PERCENT}" >> "$GITHUB_OUTPUT"
         echo "Coverage: ${PERCENT}%"
 
