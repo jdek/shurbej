@@ -1,0 +1,8 @@
+-sname shurbey
+
+## Set SHURBEY_COOKIE env var before starting.
+## Generate with: openssl rand -hex 32
+-setcookie ${SHURBEY_COOKIE:-change_me_in_production}
+
++K true
++A30

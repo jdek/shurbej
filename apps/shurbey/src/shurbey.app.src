@@ -1,0 +1,16 @@
+{application, shurbey, [
+    {description, "Self-hosted Zotero sync server"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {shurbey_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        shurbey_store,
+        shurbey_web
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+]}.
