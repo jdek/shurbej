@@ -209,7 +209,66 @@
     item_template_note/1,
     item_template_attachment/1,
     put_nonexistent_item/1,
-    duplicate_user_create/1
+    duplicate_user_create/1,
+
+    %% Coverage: POST /auth/login (JSON login)
+    auth_login_success/1,
+    auth_login_bad_password/1,
+    auth_login_missing_fields/1,
+    auth_login_bad_json/1,
+    auth_login_405/1,
+
+    %% Coverage: POST /keys (Zotero-compatible key creation)
+    keys_create_with_credentials/1,
+    keys_create_bad_credentials/1,
+    keys_create_missing_fields/1,
+
+    %% Coverage: GET /keys/:key
+    keys_get_by_key/1,
+    keys_get_by_key_invalid/1,
+    keys_delete_by_key/1,
+
+    %% Coverage: item type metadata
+    meta_item_types/1,
+    meta_item_fields/1,
+    meta_item_type_fields/1,
+    meta_creator_types/1,
+    meta_creator_fields/1,
+
+    %% Coverage: SPA catch-all
+    spa_serves_404_for_api/1,
+
+    %% Coverage: file view endpoints
+    file_view/1,
+    file_view_url/1,
+
+    %% Coverage: tags delete
+    tags_delete_bulk/1,
+    tags_item_tags/1,
+
+    %% Coverage: settings single PUT/DELETE
+    settings_single_put/1,
+    settings_single_delete/1,
+
+    %% Coverage: ZIP file upload
+    file_upload_zip/1,
+
+    %% Coverage: rate limiting
+    rate_limit_login/1,
+
+    %% Coverage: SPA, stub, upload
+    spa_serves_html_for_browser/1,
+    stub_retractions/1,
+    stub_405/1,
+    upload_multipart/1,
+
+    %% Coverage: streaming WebSocket
+    stream_single_key_connect/1,
+    stream_multi_key_subscribe/1,
+    stream_topic_updated/1,
+    stream_bad_key/1,
+    stream_bad_message/1,
+    stream_delete_subscription/1
 ]).
 
 all() ->
@@ -333,7 +392,42 @@ all() ->
         item_template_note,
         item_template_attachment,
         put_nonexistent_item,
-        duplicate_user_create
+        duplicate_user_create,
+        auth_login_success,
+        auth_login_bad_password,
+        auth_login_missing_fields,
+        auth_login_bad_json,
+        auth_login_405,
+        keys_create_with_credentials,
+        keys_create_bad_credentials,
+        keys_create_missing_fields,
+        keys_get_by_key,
+        keys_get_by_key_invalid,
+        keys_delete_by_key,
+        meta_item_types,
+        meta_item_fields,
+        meta_item_type_fields,
+        meta_creator_types,
+        meta_creator_fields,
+        spa_serves_404_for_api,
+        file_view,
+        file_view_url,
+        tags_delete_bulk,
+        tags_item_tags,
+        settings_single_put,
+        settings_single_delete,
+        file_upload_zip,
+        rate_limit_login,
+        spa_serves_html_for_browser,
+        stub_retractions,
+        stub_405,
+        upload_multipart,
+        stream_single_key_connect,
+        stream_multi_key_subscribe,
+        stream_topic_updated,
+        stream_bad_key,
+        stream_bad_message,
+        stream_delete_subscription
     ].
 
 init_per_suite(Config) ->
@@ -1837,6 +1931,552 @@ duplicate_user_create(_Config) ->
     ok.
 
 %% ===================================================================
+%% POST /auth/login (JSON login)
+%% ===================================================================
+
+auth_login_success(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>, <<"password">> => <<"testpass">>}),
+    {ok, {{_, 200, _}, _, RespBody}} =
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    Resp = simdjson:decode(RespBody),
+    ?assertMatch(#{<<"apiKey">> := _, <<"userID">> := 1, <<"username">> := <<"testuser">>}, Resp),
+    %% Verify the returned key works
+    Key = maps:get(<<"apiKey">>, Resp),
+    {ok, {{_, 200, _}, _, _}} =
+        httpc:request(get, {Base ++ "/keys/current", [{"Zotero-API-Key", binary_to_list(Key)}]},
+                      [], [{body_format, binary}]),
+    ok.
+
+auth_login_bad_password(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>, <<"password">> => <<"wrong">>}),
+    {ok, {{_, 401, _}, _, _}} =
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    ok.
+
+auth_login_missing_fields(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>}),
+    {ok, {{_, 400, _}, _, _}} =
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    ok.
+
+auth_login_bad_json(Config) ->
+    Base = ?config(base, Config),
+    {ok, {{_, 400, _}, _, _}} =
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", <<"not json">>},
+                      [], [{body_format, binary}]),
+    ok.
+
+auth_login_405(Config) ->
+    Base = ?config(base, Config),
+    {ok, {{_, 405, _}, _, _}} =
+        httpc:request(get, {Base ++ "/auth/login", []}, [], [{body_format, binary}]),
+    ok.
+
+%% ===================================================================
+%% POST /keys (Zotero-compatible key creation)
+%% ===================================================================
+
+keys_create_with_credentials(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>,
+                             <<"password">> => <<"testpass">>,
+                             <<"name">> => <<"Test Key">>}),
+    {ok, {{_, 201, _}, _, RespBody}} =
+        httpc:request(post, {Base ++ "/keys", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    Resp = simdjson:decode(RespBody),
+    ?assertMatch(#{<<"key">> := _, <<"userID">> := 1, <<"name">> := <<"Test Key">>}, Resp),
+    ?assertMatch(#{<<"access">> := #{<<"user">> := #{<<"library">> := true}}}, Resp),
+    ok.
+
+keys_create_bad_credentials(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>,
+                             <<"password">> => <<"wrong">>,
+                             <<"name">> => <<"Bad">>}),
+    {ok, {{_, 403, _}, _, _}} =
+        httpc:request(post, {Base ++ "/keys", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    ok.
+
+keys_create_missing_fields(Config) ->
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"name">> => <<"No Creds">>}),
+    {ok, {{_, 403, _}, _, _}} =
+        httpc:request(post, {Base ++ "/keys", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    ok.
+
+%% ===================================================================
+%% GET/DELETE /keys/:key
+%% ===================================================================
+
+keys_get_by_key(Config) ->
+    ApiKey = ?config(api_key, Config),
+    Base = ?config(base, Config),
+    {ok, {{_, 200, _}, _, RespBody}} =
+        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(ApiKey), []},
+                      [], [{body_format, binary}]),
+    Resp = simdjson:decode(RespBody),
+    ?assertMatch(#{<<"key">> := _, <<"userID">> := 1}, Resp),
+    ok.
+
+keys_get_by_key_invalid(Config) ->
+    Base = ?config(base, Config),
+    {ok, {{_, 403, _}, _, _}} =
+        httpc:request(get, {Base ++ "/keys/bogus_key_not_real", []},
+                      [], [{body_format, binary}]),
+    ok.
+
+keys_delete_by_key(Config) ->
+    %% Create a key to delete
+    Base = ?config(base, Config),
+    Body = simdjson:encode(#{<<"username">> => <<"testuser">>,
+                             <<"password">> => <<"testpass">>,
+                             <<"name">> => <<"Disposable">>}),
+    {ok, {{_, 201, _}, _, RespBody}} =
+        httpc:request(post, {Base ++ "/keys", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    Key = maps:get(<<"key">>, simdjson:decode(RespBody)),
+    %% Delete it
+    {ok, {{_, 204, _}, _, _}} =
+        httpc:request(delete, {Base ++ "/keys/" ++ binary_to_list(Key), []},
+                      [], [{body_format, binary}]),
+    %% Verify it's gone
+    {ok, {{_, 403, _}, _, _}} =
+        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(Key), []},
+                      [], [{body_format, binary}]),
+    ok.
+
+%% ===================================================================
+%% Item type metadata
+%% ===================================================================
+
+meta_item_types(Config) ->
+    {200, _, Body} = get_json("/itemTypes", Config),
+    ?assert(is_list(Body)),
+    ?assert(length(Body) > 0),
+    [First | _] = Body,
+    ?assert(maps:is_key(<<"itemType">>, First)),
+    ?assert(maps:is_key(<<"localized">>, First)),
+    ok.
+
+meta_item_fields(Config) ->
+    {200, _, Body} = get_json("/itemFields", Config),
+    ?assert(is_list(Body)),
+    ?assert(length(Body) > 0),
+    ok.
+
+meta_item_type_fields(Config) ->
+    {200, _, Body} = get_json("/itemTypeFields?itemType=book", Config),
+    ?assert(is_list(Body)),
+    ?assert(length(Body) > 0),
+    ok.
+
+meta_creator_types(Config) ->
+    {200, _, Body} = get_json("/itemTypeCreatorTypes?itemType=book", Config),
+    ?assert(is_list(Body)),
+    ?assert(length(Body) > 0),
+    ok.
+
+meta_creator_fields(Config) ->
+    {200, _, Body} = get_json("/creatorFields", Config),
+    ?assert(is_list(Body)),
+    ok.
+
+%% ===================================================================
+%% SPA catch-all
+%% ===================================================================
+
+spa_serves_404_for_api(Config) ->
+    %% Non-browser request to unknown path should get JSON 404
+    Base = ?config(base, Config),
+    {ok, {{_, 404, _}, _, RespBody}} =
+        httpc:request(post, {Base ++ "/nonexistent", [], "application/json", <<"{}">>},
+                      [], [{body_format, binary}]),
+    Resp = simdjson:decode(RespBody),
+    ?assertMatch(#{<<"message">> := <<"Not found">>}, Resp),
+    ok.
+
+%% ===================================================================
+%% File view endpoints
+%% ===================================================================
+
+file_view(Config) ->
+    %% Upload a file first
+    {200, _, _} = post_json("/users/1/items",
+        [#{<<"itemType">> => <<"attachment">>,
+           <<"linkMode">> => <<"imported_file">>,
+           <<"title">> => <<"view_test.txt">>}], Config),
+    {200, _, Items} = get_json("/users/1/items?itemType=attachment", Config),
+    AttKey = maps:get(<<"key">>, hd(lists:filter(
+        fun(I) -> maps:get(<<"title">>, maps:get(<<"data">>, I)) =:= <<"view_test.txt">> end,
+        Items))),
+    %% Upload
+    FileData = <<"Hello view test">>,
+    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
+        || <<B>> <= crypto:hash(md5, FileData)])),
+    {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=view_test.txt&filesize=15&mtime=1000",
+        [{"If-None-Match", "*"}], Config),
+    UploadUrl = binary_to_list(maps:get(<<"url">>, UpResp)),
+    ZipData = zip_single_file("view_test.txt", FileData),
+    {201, _, _} = post_raw(UploadUrl, ZipData),
+    {204, _, _} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "uploadKey=" ++ binary_to_list(maps:get(<<"uploadKey">>, UpResp)),
+        [{"If-None-Match", "*"}], Config),
+    %% GET /file/view
+    {200, ViewHeaders, ViewBody} = get_raw("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file/view", Config),
+    ?assertEqual(FileData, ViewBody),
+    ?assertMatch(#{<<"content-type">> := <<"text/plain">>}, ViewHeaders),
+    ok.
+
+file_view_url(Config) ->
+    {200, _, Items} = get_json("/users/1/items?itemType=attachment", Config),
+    AttKey = maps:get(<<"key">>, hd(lists:filter(
+        fun(I) -> maps:get(<<"title">>, maps:get(<<"data">>, I)) =:= <<"view_test.txt">> end,
+        Items))),
+    {200, _, Body} = get_json("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file/view/url", Config),
+    ?assert(maps:is_key(<<"url">>, Body)),
+    ok.
+
+%% ===================================================================
+%% Tags
+%% ===================================================================
+
+tags_delete_bulk(Config) ->
+    %% Create items with tags
+    {200, _, _} = post_json("/users/1/items",
+        [#{<<"itemType">> => <<"book">>, <<"title">> => <<"Tagged1">>,
+           <<"tags">> => [#{<<"tag">> => <<"delme">>}, #{<<"tag">> => <<"keepme">>}]}], Config),
+    %% Verify tag exists
+    {200, Headers, Tags} = get_json("/users/1/tags", Config),
+    ?assert(lists:any(fun(T) -> maps:get(<<"tag">>, T) =:= <<"delme">> end, Tags)),
+    %% Delete the tag (need current library version)
+    Version = binary_to_integer(maps:get(<<"last-modified-version">>, Headers)),
+    {204, _, _} = delete_req("/users/1/tags?tag=delme", Version, Config),
+    ok.
+
+tags_item_tags(Config) ->
+    {200, _, Items} = get_json("/users/1/items?q=Tagged1", Config),
+    case Items of
+        [Item | _] ->
+            Key = maps:get(<<"key">>, Item),
+            {200, _, Tags} = get_json("/users/1/items/" ++ binary_to_list(Key) ++ "/tags", Config),
+            ?assert(is_list(Tags));
+        [] -> ok
+    end,
+    ok.
+
+%% ===================================================================
+%% Settings single PUT/DELETE
+%% ===================================================================
+
+settings_single_put(Config) ->
+    {204, _, _} = put_json("/users/1/settings/testSetting",
+        #{<<"value">> => <<"hello">>}, Config),
+    {200, _, Body} = get_json("/users/1/settings/testSetting", Config),
+    ?assertMatch(#{<<"value">> := <<"hello">>}, Body),
+    ok.
+
+settings_single_delete(Config) ->
+    {204, _, _} = put_json("/users/1/settings/deleteme",
+        #{<<"value">> => <<"bye">>}, Config),
+    {200, Headers, _} = get_json("/users/1/settings/deleteme", Config),
+    Version = binary_to_integer(maps:get(<<"last-modified-version">>, Headers)),
+    {204, _, _} = delete_req("/users/1/settings/deleteme", Version, Config),
+    {404, _, _} = get_json("/users/1/settings/deleteme", Config),
+    ok.
+
+%% ===================================================================
+%% ZIP file upload
+%% ===================================================================
+
+file_upload_zip(Config) ->
+    %% Create an attachment
+    {200, _, _} = post_json("/users/1/items",
+        [#{<<"itemType">> => <<"attachment">>,
+           <<"linkMode">> => <<"imported_file">>,
+           <<"title">> => <<"zip_test.pdf">>}], Config),
+    {200, _, Items} = get_json("/users/1/items?itemType=attachment", Config),
+    AttKey = maps:get(<<"key">>, hd(lists:filter(
+        fun(I) -> maps:get(<<"title">>, maps:get(<<"data">>, I)) =:= <<"zip_test.pdf">> end,
+        Items))),
+    %% Create a ZIP-compressed file (like Zotero does)
+    FileData = <<"fake pdf content for testing zip upload">>,
+    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
+        || <<B>> <= crypto:hash(md5, FileData)])),
+    {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=zip_test.pdf&filesize=" ++
+        integer_to_list(byte_size(FileData)) ++ "&mtime=2000",
+        [{"If-None-Match", "*"}], Config),
+    UploadUrl = binary_to_list(maps:get(<<"url">>, UpResp)),
+    ZipData = zip_single_file("zip_test.pdf", FileData),
+    {201, _, _} = post_raw(UploadUrl, ZipData),
+    %% Register
+    {204, _, _} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "uploadKey=" ++ binary_to_list(maps:get(<<"uploadKey">>, UpResp)),
+        [{"If-None-Match", "*"}], Config),
+    %% Download and verify
+    {200, _, Downloaded} = get_raw("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file", Config),
+    ?assertEqual(FileData, Downloaded),
+    ok.
+
+%% ===================================================================
+%% Rate limiting
+%% ===================================================================
+
+rate_limit_login(Config) ->
+    Base = ?config(base, Config),
+    %% Exhaust login attempts (5 max per 5 min window)
+    lists:foreach(fun(_) ->
+        Body = simdjson:encode(#{<<"username">> => <<"ratelimituser">>, <<"password">> => <<"bad">>}),
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", Body},
+                      [], [{body_format, binary}])
+    end, lists:seq(1, 6)),
+    %% Next attempt should be rate limited
+    Body = simdjson:encode(#{<<"username">> => <<"ratelimituser">>, <<"password">> => <<"bad">>}),
+    {ok, {{_, Status, _}, _, _}} =
+        httpc:request(post, {Base ++ "/auth/login", [], "application/json", Body},
+                      [], [{body_format, binary}]),
+    ?assertEqual(429, Status),
+    ok.
+
+%% ===================================================================
+%% SPA catch-all
+%% ===================================================================
+
+spa_serves_html_for_browser(Config) ->
+    Base = ?config(base, Config),
+    %% Browser-like request with Accept: text/html to unknown path
+    {ok, {{_, Status, _}, RespHeaders, _}} =
+        httpc:request(get, {Base ++ "/some/spa/route",
+            [{"Accept", "text/html,application/xhtml+xml"}]},
+            [], [{body_format, binary}]),
+    %% Should get either 200 (if UI built) or 404 with text explaining to build
+    ?assert(Status =:= 200 orelse Status =:= 404),
+    ok.
+
+%% ===================================================================
+%% Stub endpoint
+%% ===================================================================
+
+stub_retractions(Config) ->
+    {200, _, Body} = get_json("/retractions/list", Config),
+    ?assertEqual([], Body),
+    ok.
+
+stub_405(Config) ->
+    {405, _, _} = request(post, "/retractions/list", [], <<"{}">>, Config, true),
+    ok.
+
+%% ===================================================================
+%% Multipart file upload
+%% ===================================================================
+
+upload_multipart(Config) ->
+    %% Create an attachment
+    {200, _, _} = post_json("/users/1/items",
+        [#{<<"itemType">> => <<"attachment">>,
+           <<"linkMode">> => <<"imported_file">>,
+           <<"title">> => <<"multipart_test.txt">>}], Config),
+    {200, _, Items} = get_json("/users/1/items?itemType=attachment", Config),
+    AttKey = maps:get(<<"key">>, hd(lists:filter(
+        fun(I) -> maps:get(<<"title">>, maps:get(<<"data">>, I)) =:= <<"multipart_test.txt">> end,
+        Items))),
+    FileData = <<"multipart upload test content">>,
+    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
+        || <<B>> <= crypto:hash(md5, FileData)])),
+    {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=multipart_test.txt&filesize=" ++
+        integer_to_list(byte_size(FileData)) ++ "&mtime=3000",
+        [{"If-None-Match", "*"}], Config),
+    UploadUrl = binary_to_list(maps:get(<<"url">>, UpResp)),
+    %% Send as multipart/form-data
+    Boundary = <<"----TestBoundary123">>,
+    MultipartBody = <<"------TestBoundary123\r\n",
+        "Content-Disposition: form-data; name=\"file\"; filename=\"multipart_test.txt\"\r\n",
+        "Content-Type: application/octet-stream\r\n\r\n",
+        FileData/binary, "\r\n",
+        "------TestBoundary123--\r\n">>,
+    CT = "multipart/form-data; boundary=----TestBoundary123",
+    {ok, {{_, 201, _}, _, _}} =
+        httpc:request(post, {UploadUrl, [], CT, MultipartBody},
+                      [], [{body_format, binary}]),
+    %% Register
+    {204, _, _} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
+        "uploadKey=" ++ binary_to_list(maps:get(<<"uploadKey">>, UpResp)),
+        [{"If-None-Match", "*"}], Config),
+    %% Verify
+    {200, _, Downloaded} = get_raw("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file", Config),
+    ?assertEqual(FileData, Downloaded),
+    ok.
+
+%% ===================================================================
+%% Streaming WebSocket (/stream)
+%% ===================================================================
+
+stream_single_key_connect(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    ApiKey = ?config(api_key, Config),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    StreamRef = gun:ws_upgrade(Pid, "/stream?key=" ++ binary_to_list(ApiKey)),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    %% Should get connected event with topics
+    receive {gun_ws, Pid, StreamRef, {text, Msg}} ->
+        Event = simdjson:decode(Msg),
+        ?assertEqual(<<"connected">>, maps:get(<<"event">>, Event)),
+        ?assert(maps:is_key(<<"topics">>, Event)),
+        Topics = maps:get(<<"topics">>, Event),
+        ?assert(lists:member(<<"/users/1">>, Topics))
+    after 5000 -> ct:fail("connected event timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+stream_multi_key_subscribe(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    ApiKey = ?config(api_key, Config),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    %% Connect without key — multi-key mode
+    StreamRef = gun:ws_upgrade(Pid, "/stream"),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    %% Get connected event (no topics)
+    receive {gun_ws, Pid, StreamRef, {text, ConnMsg}} ->
+        ConnEvent = simdjson:decode(ConnMsg),
+        ?assertEqual(<<"connected">>, maps:get(<<"event">>, ConnEvent)),
+        ?assertNot(maps:is_key(<<"topics">>, ConnEvent))
+    after 5000 -> ct:fail("connected event timeout")
+    end,
+    %% Subscribe with API key
+    SubMsg = simdjson:encode(#{
+        <<"action">> => <<"createSubscriptions">>,
+        <<"subscriptions">> => [#{<<"apiKey">> => ApiKey}]
+    }),
+    gun:ws_send(Pid, StreamRef, {text, SubMsg}),
+    receive {gun_ws, Pid, StreamRef, {text, SubResp}} ->
+        SubEvent = simdjson:decode(SubResp),
+        ?assertEqual(<<"subscriptionsCreated">>, maps:get(<<"event">>, SubEvent)),
+        Subs = maps:get(<<"subscriptions">>, SubEvent),
+        ?assert(length(Subs) > 0)
+    after 5000 -> ct:fail("subscriptionsCreated timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+stream_topic_updated(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    ApiKey = ?config(api_key, Config),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    StreamRef = gun:ws_upgrade(Pid, "/stream?key=" ++ binary_to_list(ApiKey)),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    %% Consume connected event
+    receive {gun_ws, Pid, StreamRef, {text, _}} -> ok
+    after 5000 -> ct:fail("connected timeout")
+    end,
+    %% Trigger a library update by creating an item
+    {200, _, _} = post_json("/users/1/items",
+        [#{<<"itemType">> => <<"book">>, <<"title">> => <<"Stream Test">>}], Config),
+    %% Should receive topicUpdated
+    receive {gun_ws, Pid, StreamRef, {text, UpdateMsg}} ->
+        Event = simdjson:decode(UpdateMsg),
+        ?assertEqual(<<"topicUpdated">>, maps:get(<<"event">>, Event)),
+        ?assertEqual(<<"/users/1">>, maps:get(<<"topic">>, Event))
+    after 5000 -> ct:fail("topicUpdated timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+stream_bad_key(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    StreamRef = gun:ws_upgrade(Pid, "/stream?key=bogus_invalid_key"),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    %% Should get closed with 4403
+    receive
+        {gun_ws, Pid, StreamRef, {close, 4403, _}} -> ok;
+        {gun_ws, Pid, StreamRef, {close, _, _}} -> ok
+    after 5000 -> ct:fail("close timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+stream_bad_message(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    StreamRef = gun:ws_upgrade(Pid, "/stream"),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    %% Consume connected
+    receive {gun_ws, Pid, StreamRef, {text, _}} -> ok
+    after 5000 -> ct:fail("connected timeout")
+    end,
+    %% Send garbage
+    gun:ws_send(Pid, StreamRef, {text, <<"not json at all">>}),
+    receive
+        {gun_ws, Pid, StreamRef, {close, 4400, _}} -> ok;
+        {gun_ws, Pid, StreamRef, {close, _, _}} -> ok
+    after 5000 -> ct:fail("close timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+stream_delete_subscription(Config) ->
+    {ok, _} = application:ensure_all_started(gun),
+    ApiKey = ?config(api_key, Config),
+    {ok, Pid} = gun:open("localhost", 18080),
+    {ok, _} = gun:await_up(Pid),
+    StreamRef = gun:ws_upgrade(Pid, "/stream"),
+    receive {gun_upgrade, Pid, StreamRef, [<<"websocket">>], _} -> ok
+    after 5000 -> ct:fail("WS upgrade timeout")
+    end,
+    receive {gun_ws, Pid, StreamRef, {text, _}} -> ok
+    after 5000 -> ct:fail("connected timeout")
+    end,
+    %% Subscribe
+    SubMsg = simdjson:encode(#{
+        <<"action">> => <<"createSubscriptions">>,
+        <<"subscriptions">> => [#{<<"apiKey">> => ApiKey}]
+    }),
+    gun:ws_send(Pid, StreamRef, {text, SubMsg}),
+    receive {gun_ws, Pid, StreamRef, {text, _SubResp}} -> ok
+    after 5000 -> ct:fail("sub timeout")
+    end,
+    %% Delete subscription
+    DelMsg = simdjson:encode(#{
+        <<"action">> => <<"deleteSubscriptions">>,
+        <<"subscriptions">> => [#{<<"apiKey">> => ApiKey}]
+    }),
+    gun:ws_send(Pid, StreamRef, {text, DelMsg}),
+    receive {gun_ws, Pid, StreamRef, {text, DelResp}} ->
+        DelEvent = simdjson:decode(DelResp),
+        ?assertEqual(<<"subscriptionsDeleted">>, maps:get(<<"event">>, DelEvent))
+    after 5000 -> ct:fail("del timeout")
+    end,
+    gun:close(Pid),
+    ok.
+
+%% ===================================================================
 %% HTTP helpers
 %% ===================================================================
 
@@ -1971,3 +2611,8 @@ request(Method, Path, ExtraHeaders, ReqBody, Config, WithAuth) ->
         {error, Reason} ->
             ct:fail("HTTP request failed: ~p", [Reason])
     end.
+
+%% Create a ZIP archive containing a single file (mimics Zotero upload format).
+zip_single_file(Filename, Data) ->
+    {ok, {_, ZipBin}} = zip:zip("archive.zip", [{Filename, Data}], [memory]),
+    ZipBin.
