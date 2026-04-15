@@ -20,7 +20,7 @@
     list_collections_top/2, list_subcollections/3,
     write_collection/1, mark_collection_deleted/3,
     %% Searches
-    list_searches/2, list_search_versions/2, write_search/1, mark_search_deleted/3,
+    get_search/2, list_searches/2, list_search_versions/2, write_search/1, mark_search_deleted/3,
     %% Tags
     list_tags/2, list_item_tags/2, delete_tags_by_name/2, set_item_tags/3, delete_item_tags/2,
     %% Settings
@@ -282,6 +282,12 @@ mark_collection_deleted(LibId, CollKey, Version) ->
 %% ===================================================================
 %% Searches
 %% ===================================================================
+
+get_search(LibId, SearchKey) ->
+    case db_read(shurbey_search, {LibId, SearchKey}) of
+        [#shurbey_search{deleted = false} = S] -> {ok, S};
+        _ -> undefined
+    end.
 
 list_searches(LibId, Since) ->
     MS = ets:fun2ms(

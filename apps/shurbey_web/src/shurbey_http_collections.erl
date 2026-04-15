@@ -111,7 +111,11 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
                         })
                     end) of
                         {ok, NewVersion} ->
-                            {ok, Updated} = shurbey_db:get_collection(LibId, CollKey),
+                            FullData = Coll#{<<"version">> => NewVersion},
+                            Updated = #shurbey_collection{
+                                id = {LibId, CollKey}, version = NewVersion,
+                                data = FullData, deleted = false
+                            },
                             Envelope = shurbey_http_common:envelope_collection(LibId, Updated),
                             Req = shurbey_http_common:json_response(200, Envelope, NewVersion, Req1),
                             {ok, Req, State};

@@ -104,8 +104,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
                                 write_item(LibId, Item, NewVersion)
                             end) of
                                 {ok, NewVersion} ->
-                                    {ok, UpdatedItem} = shurbey_db:get_item(LibId, ItemKey),
-                                    Envelope = shurbey_http_common:envelope_item(LibId, UpdatedItem),
+                                    Envelope = envelope_for_write(LibId, Item, NewVersion),
                                     Req = shurbey_http_common:json_response(200, Envelope, NewVersion, Req1),
                                     {ok, Req, State};
                                 {error, precondition, CurrentVersion} ->

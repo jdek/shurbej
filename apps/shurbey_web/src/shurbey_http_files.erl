@@ -111,7 +111,8 @@ handle(<<"POST">>, Req0, State) ->
                         ok ->
                     case ExistingMeta of
                         {ok, #shurbey_file_meta{md5 = Md5}} ->
-                            Req = shurbey_http_common:json_response(200, #{<<"exists">> => 1}, Req1),
+                            {ok, LibVer} = shurbey_version:get(LibId),
+                            Req = shurbey_http_common:json_response(200, #{<<"exists">> => 1}, LibVer, Req1),
                             {ok, Req, State};
                         _ ->
                             %% New file — require upload. SHA-256 dedup happens in store().

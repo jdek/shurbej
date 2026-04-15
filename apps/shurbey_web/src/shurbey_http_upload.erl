@@ -43,7 +43,7 @@ read_file_data(Req) ->
         <<"multipart/form-data", _/binary>> ->
             read_multipart_file(Req);
         _ ->
-            {ok, Body, Req1} = read_full_body(Req, <<>>),
+            {ok, Body, Req1} = read_full_body(Req, []),
             {Body, Req1}
     end.
 
@@ -53,25 +53,26 @@ read_multipart_file(Req0) ->
         {ok, Headers, Req1} ->
             case cow_multipart:form_data(Headers) of
                 {file, <<"file">>, _Filename, _CT} ->
-                    {ok, Body, Req2} = read_part_body(Req1, <<>>),
+                    {ok, Body, Req2} = read_part_body(Req1, []),
                     {Body, Req2};
                 _ ->
                     %% Skip non-file parts
-                    {ok, _Skip, Req2} = read_part_body(Req1, <<>>),
+                    {ok, _Skip, Req2} = read_part_body(Req1, []),
                     read_multipart_file(Req2)
             end;
         {done, Req1} ->
             {<<>>, Req1}
     end.
 
+%% Accumulate chunks in a reversed list, flatten once at the end.
 read_part_body(Req0, Acc) ->
     case cowboy_req:read_part_body(Req0) of
-        {ok, Body, Req} -> {ok, <<Acc/binary, Body/binary>>, Req};
-        {more, Body, Req} -> read_part_body(Req, <<Acc/binary, Body/binary>>)
+        {ok, Body, Req} -> {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req};
+        {more, Body, Req} -> read_part_body(Req, [Body | Acc])
     end.
 
 read_full_body(Req0, Acc) ->
     case cowboy_req:read_body(Req0, #{length => 8_000_000, period => 30000}) of
-        {ok, Body, Req} -> {ok, <<Acc/binary, Body/binary>>, Req};
-        {more, Body, Req} -> read_full_body(Req, <<Acc/binary, Body/binary>>)
+        {ok, Body, Req} -> {ok, iolist_to_binary(lists:reverse([Body | Acc])), Req};
+        {more, Body, Req} -> read_full_body(Req, [Body | Acc])
     end.

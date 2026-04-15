@@ -66,12 +66,11 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
             Req = shurbey_http_common:error_response(400, <<"Invalid JSON">>, Req1),
             {ok, Req, State};
         {ok, Incoming, Req1} ->
-    Searches = shurbey_db:list_searches(LibId, 0),
-    case [S || #shurbey_search{id = {_, K}} = S <- Searches, K =:= SearchKey] of
-        [] ->
+    case shurbey_db:get_search(LibId, SearchKey) of
+        undefined ->
             Req = shurbey_http_common:error_response(404, <<"Search not found">>, Req1),
             {ok, Req, State};
-        [#shurbey_search{data = Existing}] ->
+        {ok, #shurbey_search{data = Existing}} ->
             Merged = case Method of
                 <<"PATCH">> -> maps:merge(Existing, Incoming);
                 <<"PUT">> -> Incoming
