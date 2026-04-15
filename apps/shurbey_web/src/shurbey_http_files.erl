@@ -51,7 +51,6 @@ handle(<<"GET">>, Req0, State) ->
 handle(<<"POST">>, Req0, State) ->
     LibId = shurbey_http_common:library_id(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
-    ExpectedVersion = shurbey_http_common:get_if_unmodified(Req0),
     {ok, Body, Req1} = cowboy_req:read_body(Req0),
     case cowboy_req:header(<<"content-type">>, Req1) of
         <<"application/x-www-form-urlencoded", _/binary>> ->
@@ -63,10 +62,9 @@ handle(<<"POST">>, Req0, State) ->
                 {register, UploadKey} ->
                     %% Registration: client confirms upload with uploadKey
                     case shurbey_files:register_upload(UploadKey) of
-                        ok ->
-                            {ok, LibVersion} = shurbey_version:get(LibId),
+                        {ok, NewVersion} ->
                             Req = cowboy_req:reply(204, #{
-                                <<"last-modified-version">> => integer_to_binary(LibVersion)
+                                <<"last-modified-version">> => integer_to_binary(NewVersion)
                             }, Req1),
                             {ok, Req, State};
                         {error, not_found} ->
@@ -111,15 +109,16 @@ handle(<<"POST">>, Req0, State) ->
                         ok ->
                     case ExistingMeta of
                         {ok, #shurbey_file_meta{md5 = Md5}} ->
-                            {ok, LibVer} = shurbey_version:get(LibId),
-                            Req = shurbey_http_common:json_response(200, #{<<"exists">> => 1}, LibVer, Req1),
+                            %% Bump version through the gen_server so concurrent
+                            %% exists + registration responses stay ordered.
+                            {ok, NewVer} = shurbey_files:confirm_existing(LibId, ItemKey),
+                            Req = shurbey_http_common:json_response(200, #{<<"exists">> => 1}, NewVer, Req1),
                             {ok, Req, State};
                         _ ->
                             %% New file — require upload. SHA-256 dedup happens in store().
                                     UploadKey = shurbey_files:prepare_upload(LibId, ItemKey, #{
                                         md5 => Md5, filename => Filename,
-                                        filesize => Filesize, mtime => Mtime,
-                                        expected_version => ExpectedVersion
+                                        filesize => Filesize, mtime => Mtime
                                     }),
                                     BaseUrl = application:get_env(shurbey, base_url, <<"http://localhost:8080">>),
                                     UploadUrl = iolist_to_binary([BaseUrl, "/upload/", UploadKey]),

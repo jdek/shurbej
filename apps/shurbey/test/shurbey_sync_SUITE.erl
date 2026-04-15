@@ -83,6 +83,7 @@
     file_upload_download/1,
     file_content_addressed_dedup/1,
     file_refcount_cleanup/1,
+    file_concurrent_upload_versions/1,
 
     %% Auth flow
     session_login_flow/1,
@@ -308,6 +309,7 @@ all() ->
         file_upload_download,
         file_content_addressed_dedup,
         file_refcount_cleanup,
+        file_concurrent_upload_versions,
         session_login_flow,
         session_poll_pending,
         session_cancel,
@@ -1033,6 +1035,101 @@ file_refcount_cleanup(Config) ->
     file:delete(BlobFile),
     ?assertNot(filelib:is_regular(BlobFile)),
     ok.
+
+%% Simulate Zotero's concurrent file upload: upload multiple files in
+%% parallel and verify that Last-Modified-Version never decreases across
+%% any response (auth-exists, registration). Also verify item versions
+%% bump so incremental sync detects file changes.
+file_concurrent_upload_versions(Config) ->
+    hex_md5(<<>>), %% force function availability check
+    %% Create 4 attachment items
+    Items = [#{<<"itemType">> => <<"attachment">>,
+               <<"title">> => <<"file_", (integer_to_binary(N))/binary, ".pdf">>}
+             || N <- lists:seq(1, 4)],
+    {200, _, CreateBody} = post_json("/users/1/items", Items, Config),
+    Successful = maps:get(<<"successful">>, CreateBody),
+    Keys = [maps:get(<<"key">>, maps:get(integer_to_binary(I), Successful))
+            || I <- lists:seq(0, 3)],
+
+    %% Record library version after items sync
+    {200, BaseHeaders, _} = get_json("/users/1/items?format=versions", Config),
+    BaseVersion = binary_to_integer(maps:get(<<"last-modified-version">>, BaseHeaders)),
+
+    %% Upload all 4 files (sequentially, but each goes through the full
+    %% auth → upload → register cycle, which bumps the version)
+    FileVersions = lists:map(fun(Key) ->
+        FileData = <<"content for ", Key/binary>>,
+        Md5 = hex_md5(FileData),
+        UploadParams = cow_qs:qs([
+            {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
+            {<<"filename">>, <<"test.pdf">>},
+            {<<"filesize">>, integer_to_binary(byte_size(FileData))},
+            {<<"mtime">>, <<"1700000000">>}
+        ]),
+        Path = "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+        {200, _, Auth} = post_form(Path, UploadParams, [{"If-None-Match", "*"}], Config),
+        UploadKey = maps:get(<<"uploadKey">>, Auth),
+        UploadUrl = maps:get(<<"url">>, Auth),
+        {201, _, _} = post_raw(binary_to_list(UploadUrl), FileData),
+        RegParams = cow_qs:qs([{<<"uploadKey">>, UploadKey}]),
+        {204, RegHeaders, _} = post_form(Path, RegParams, Config),
+        RegVersion = binary_to_integer(
+            maps:get(<<"last-modified-version">>, RegHeaders)),
+        ?assert(RegVersion > BaseVersion),
+        RegVersion
+    end, Keys),
+
+    %% Versions must be strictly increasing
+    ?assertEqual(FileVersions, lists:sort(FileVersions)),
+    ?assertEqual(length(FileVersions), length(lists:usort(FileVersions))),
+
+    %% Now re-upload the same files (exists path) — simulates force re-upload
+    ExistsVersions = lists:map(fun(Key) ->
+        FileData = <<"content for ", Key/binary>>,
+        Md5 = hex_md5(FileData),
+        UploadParams = cow_qs:qs([
+            {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
+            {<<"filename">>, <<"test.pdf">>},
+            {<<"filesize">>, integer_to_binary(byte_size(FileData))},
+            {<<"mtime">>, <<"1700000000">>}
+        ]),
+        Path = "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+        {200, ExHeaders, ExBody} = post_form(Path, UploadParams,
+                                              [{"If-Match", binary_to_list(Md5)}], Config),
+        ?assertEqual(1, maps:get(<<"exists">>, ExBody)),
+        ExVersion = binary_to_integer(
+            maps:get(<<"last-modified-version">>, ExHeaders)),
+        ExVersion
+    end, Keys),
+
+    %% Exists versions must also be strictly increasing (each bumps)
+    ?assertEqual(ExistsVersions, lists:sort(ExistsVersions)),
+    ?assertEqual(length(ExistsVersions), length(lists:usort(ExistsVersions))),
+
+    %% All exists versions must be >= all registration versions (never decreasing)
+    ?assert(hd(ExistsVersions) > lists:last(FileVersions)),
+
+    %% Item versions must reflect file changes (for incremental sync)
+    LastVersion = lists:last(ExistsVersions),
+    {200, _, SinceItems} = get_json(
+        "/users/1/items?format=versions&since=" ++ integer_to_list(BaseVersion), Config),
+    %% All 4 items should appear in incremental sync
+    lists:foreach(fun(Key) ->
+        ?assert(maps:is_key(Key, SinceItems),
+                iolist_to_binary(["Item ", Key, " missing from incremental sync"]))
+    end, Keys),
+
+    %% Each item's version should be > BaseVersion
+    maps:foreach(fun(_K, V) ->
+        ?assert(V > BaseVersion)
+    end, SinceItems),
+
+    %% Library version should have advanced by at least 8 (4 registrations + 4 exists)
+    ?assert(LastVersion >= BaseVersion + 8),
+    ok.
+
+hex_md5(Data) ->
+    binary:encode_hex(crypto:hash(md5, Data), lowercase).
 
 %% ===================================================================
 %% Auth flow

@@ -11,7 +11,8 @@
     store/3,
     register_upload/1,
     mark_stored/2,
-    cleanup_expired_uploads/0
+    cleanup_expired_uploads/0,
+    confirm_existing/2
 ]).
 
 %% gen_server callbacks
@@ -113,8 +114,11 @@ handle_call({register_upload, UploadKey}, _From, State) ->
         [{_, #{stored := true, library_id := LibId, item_key := ItemKey, meta := Meta,
                sha256 := Sha256}}] ->
             #{md5 := Md5, filename := Filename, filesize := Filesize,
-              mtime := Mtime, expected_version := ExpectedVersion} = Meta,
-            WriteResult = shurbey_version:write(LibId, ExpectedVersion, fun(_NewVersion) ->
+              mtime := Mtime} = Meta,
+            %% Use `any` — concurrent uploads must not fail with precondition
+            %% errors. The gen_server serializes writes, so versions are
+            %% monotonically increasing and responses stay ordered.
+            WriteResult = shurbey_version:write(LibId, any, fun(NewVersion) ->
                 case shurbey_db:get_file_meta(LibId, ItemKey) of
                     {ok, #shurbey_file_meta{sha256 = OldHash}} when OldHash =/= Sha256 ->
                         case shurbey_db:blob_unref(OldHash) of
@@ -126,19 +130,16 @@ handle_call({register_upload, UploadKey}, _From, State) ->
                 shurbey_db:blob_ref(Sha256),
                 shurbey_db:write_file_meta(#shurbey_file_meta{
                     id = {LibId, ItemKey},
-                    md5 = Md5,
-                    sha256 = Sha256,
-                    filename = Filename,
-                    filesize = Filesize,
+                    md5 = Md5, sha256 = Sha256,
+                    filename = Filename, filesize = Filesize,
                     mtime = Mtime
                 }),
+                %% Bump item version so incremental sync detects the file change
+                bump_item_version(LibId, ItemKey, NewVersion),
                 ok
             end),
             ets:delete(?TABLE, UploadKey),
-            case WriteResult of
-                {ok, _Version} -> ok;
-                {error, precondition, _} -> {error, precondition_failed}
-            end;
+            WriteResult;
         [{_, #{stored := false}}] ->
             {error, not_stored};
         [] ->
@@ -168,6 +169,22 @@ handle_cast(_Msg, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
+%% Confirm an existing file — bumps library + item version so concurrent
+%% exists responses are serialized with registrations through the version
+%% gen_server, keeping Last-Modified-Version monotonic for the client.
+confirm_existing(LibId, ItemKey) ->
+    shurbey_version:write(LibId, any, fun(NewVersion) ->
+        bump_item_version(LibId, ItemKey, NewVersion),
+        ok
+    end).
+
+bump_item_version(LibId, ItemKey, NewVersion) ->
+    case shurbey_db:get_item(LibId, ItemKey) of
+        {ok, Item} ->
+            shurbey_db:write_item(Item#shurbey_item{version = NewVersion});
+        _ -> ok
+    end.
+
 %% Internal
 
 delete_blob_file(Hash) ->
@@ -188,16 +205,10 @@ maybe_unzip(Data) ->
     Data.
 
 hex_hash(Algorithm, Data) ->
-    Hash = crypto:hash(Algorithm, Data),
-    list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Hash]
-    )).
+    binary:encode_hex(crypto:hash(Algorithm, Data), lowercase).
 
 generate_upload_key() ->
-    Bytes = crypto:strong_rand_bytes(16),
-    list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Bytes]
-    )).
+    binary:encode_hex(crypto:strong_rand_bytes(16), lowercase).
 
 to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(L) when is_list(L) -> L.
