@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -47,3 +49,21 @@ jobs:
         valColorRange: ${{ steps.coverage.outputs.percent }}
         minColorRange: 50
         maxColorRange: 90
+
+    - name: Upload coverage report
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: _build/test/cover
+
+  deploy-coverage:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
