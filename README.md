@@ -1,5 +1,8 @@
 # Shurbey
 
+[![Erlang CI](https://github.com/jdek/shurbey/actions/workflows/erlang.yml/badge.svg)](https://github.com/jdek/shurbey/actions/workflows/erlang.yml)
+![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/jdek/e28b9a35b796ab5996313c844f01ac59/raw/shurbey-coverage.json)
+
 Self-hosted Zotero sync server with basic web UI.
 
 ## Setup

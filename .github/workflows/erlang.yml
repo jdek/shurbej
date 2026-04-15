@@ -10,9 +10,7 @@ permissions:
   contents: read
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
 
     container:
@@ -20,7 +18,32 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
     - name: Compile
       run: rebar3 compile
-    - name: Run tests
-      run: rebar3 do eunit, ct
+
+    - name: Run tests with coverage
+      run: rebar3 ct --cover
+
+    - name: Generate coverage report
+      run: rebar3 cover --verbose
+
+    - name: Extract coverage percentage
+      id: coverage
+      run: |
+        PERCENT=$(rebar3 cover 2>&1 | grep -oP 'Total:\s+\K[0-9]+')
+        echo "percent=${PERCENT}" >> "$GITHUB_OUTPUT"
+        echo "Coverage: ${PERCENT}%"
+
+    - name: Create coverage badge
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: schneegans/dynamic-badges-action@v1.7.0
+      with:
+        auth: ${{ secrets.GIST_TOKEN }}
+        gistID: ${{ vars.COVERAGE_GIST_ID }}
+        filename: shurbey-coverage.json
+        label: coverage
+        message: ${{ steps.coverage.outputs.percent }}%
+        valColorRange: ${{ steps.coverage.outputs.percent }}
+        minColorRange: 50
+        maxColorRange: 90
