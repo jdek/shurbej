@@ -13,6 +13,8 @@
     get_item/2, list_items/2, list_item_versions/2, write_item/1, mark_item_deleted/3,
     list_items_top/2, list_items_trash/2, list_items_children/3, list_items_in_collection/3,
     count_item_children/1,
+    %% Collection index
+    set_item_collections/3, delete_item_collections/2,
     %% Collections
     get_collection/2, list_collections/2, list_collection_versions/2,
     list_collections_top/2, list_subcollections/3,
@@ -192,8 +194,12 @@ mark_item_deleted(LibId, ItemKey, Version) ->
     end.
 
 list_items_top(LibId, Since) ->
-    [I || #shurbey_item{data = D} = I <- list_items(LibId, Since),
-          maps:get(<<"parentItem">>, D, false) =:= false].
+    MS = ets:fun2ms(
+        fun(#shurbey_item{id = {L, _}, version = V, deleted = false,
+                          parent_key = undefined} = Item)
+            when L =:= LibId, V > Since -> Item
+        end),
+    mnesia:dirty_select(shurbey_item, MS).
 
 list_items_trash(LibId, Since) ->
     MS = ets:fun2ms(
@@ -203,26 +209,32 @@ list_items_trash(LibId, Since) ->
     mnesia:dirty_select(shurbey_item, MS).
 
 list_items_children(LibId, ParentKey, Since) ->
-    [I || #shurbey_item{data = D} = I <- list_items(LibId, Since),
-          maps:get(<<"parentItem">>, D, false) =:= ParentKey].
+    %% Secondary index on parent_key: O(k) instead of full table scan.
+    Candidates = mnesia:dirty_index_read(shurbey_item, ParentKey,
+                                         #shurbey_item.parent_key),
+    [I || #shurbey_item{id = {L, _}, version = V, deleted = false} = I
+          <- Candidates, L =:= LibId, V > Since].
 
 list_items_in_collection(LibId, CollKey, Since) ->
-    [I || #shurbey_item{data = D} = I <- list_items(LibId, Since),
-          lists:member(CollKey, maps:get(<<"collections">>, D, []))].
+    %% Bag table: O(1) key lookup returns all items in this collection.
+    Rows = mnesia:dirty_read(shurbey_item_collection, {LibId, CollKey}),
+    lists:filtermap(fun(#shurbey_item_collection{item_key = IK}) ->
+        case get_item(LibId, IK) of
+            {ok, #shurbey_item{version = V} = Item} when V > Since -> {true, Item};
+            _ -> false
+        end
+    end, Rows).
 
 count_item_children(LibId) ->
+    %% Return only the parent_key field — no full data maps deserialized.
     MS = ets:fun2ms(
-        fun(#shurbey_item{id = {L, _}, data = D, deleted = false})
-            when L =:= LibId -> D
+        fun(#shurbey_item{id = {L, _}, deleted = false, parent_key = PK})
+            when L =:= LibId, PK =/= undefined -> PK
         end),
-    AllData = mnesia:dirty_select(shurbey_item, MS),
-    lists:foldl(fun(D, Acc) ->
-        case maps:get(<<"parentItem">>, D, false) of
-            Parent when is_binary(Parent) ->
-                maps:update_with(Parent, fun(N) -> N + 1 end, 1, Acc);
-            _ -> Acc
-        end
-    end, #{}, AllData).
+    ParentKeys = mnesia:dirty_select(shurbey_item, MS),
+    lists:foldl(fun(PK, Acc) ->
+        maps:update_with(PK, fun(N) -> N + 1 end, 1, Acc)
+    end, #{}, ParentKeys).
 
 %% ===================================================================
 %% Collections
@@ -301,15 +313,26 @@ mark_search_deleted(LibId, SearchKey, Version) ->
 %% ===================================================================
 
 list_tags(LibId, Since) ->
-    Items = list_items(LibId, Since),
-    ItemKeys = [maps:get(<<"key">>, I#shurbey_item.data) || I <- Items],
-    lists:usort(lists:flatmap(fun(TargetKey) ->
-        MS = ets:fun2ms(
-            fun(#shurbey_tag{id = {L, Tag, IK}, tag_type = Type})
-                when L =:= LibId, IK =:= TargetKey -> {Tag, Type}
-            end),
-        mnesia:dirty_select(shurbey_tag, MS)
-    end, ItemKeys)).
+    case Since of
+        0 ->
+            %% Full sync: single scan of the tag table by LibId.
+            MS = ets:fun2ms(
+                fun(#shurbey_tag{id = {L, Tag, _}, tag_type = Type})
+                    when L =:= LibId -> {Tag, Type}
+                end),
+            lists:usort(mnesia:dirty_select(shurbey_tag, MS));
+        _ ->
+            %% Incremental: build key set from changed items, single tag scan.
+            ItemKeySet = sets:from_list(
+                [K || {K, _V} <- list_item_versions(LibId, Since)]),
+            MS = ets:fun2ms(
+                fun(#shurbey_tag{id = {L, Tag, IK}, tag_type = Type})
+                    when L =:= LibId -> {Tag, Type, IK}
+                end),
+            AllTags = mnesia:dirty_select(shurbey_tag, MS),
+            lists:usort([{Tag, Type} || {Tag, Type, IK} <- AllTags,
+                                        sets:is_element(IK, ItemKeySet)])
+    end.
 
 set_item_tags(LibId, ItemKey, Tags) ->
     delete_item_tags(LibId, ItemKey),
@@ -473,6 +496,24 @@ blob_unref(Hash) ->
         end
     end),
     Result.
+
+%% ===================================================================
+%% Collection index
+%% ===================================================================
+
+set_item_collections(LibId, ItemKey, CollKeys) ->
+    delete_item_collections(LibId, ItemKey),
+    lists:foreach(fun(CollKey) ->
+        db_write(#shurbey_item_collection{id = {LibId, CollKey}, item_key = ItemKey})
+    end, CollKeys).
+
+delete_item_collections(LibId, ItemKey) ->
+    MS = ets:fun2ms(
+        fun(#shurbey_item_collection{id = {L, _}, item_key = IK} = R)
+            when L =:= LibId, IK =:= ItemKey -> R
+        end),
+    Existing = mnesia:dirty_select(shurbey_item_collection, MS),
+    lists:foreach(fun(R) -> db_delete_object(R) end, Existing).
 
 %% ===================================================================
 %% Internal

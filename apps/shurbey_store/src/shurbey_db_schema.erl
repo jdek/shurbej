@@ -10,8 +10,6 @@ ensure() ->
     ok.
 
 ensure_schema() ->
-    %% create_schema must be called before mnesia:start for disc_copies.
-    %% Stop mnesia in case it was started as a dependency elsewhere.
     mnesia:stop(),
     Node = node(),
     case mnesia:create_schema([Node]) of
@@ -28,7 +26,7 @@ ensure_tables() ->
     Tables = [
         {shurbey_library, record_info(fields, shurbey_library), set, []},
         {shurbey_api_key, record_info(fields, shurbey_api_key), set, []},
-        {shurbey_item, record_info(fields, shurbey_item), set, []},
+        {shurbey_item, record_info(fields, shurbey_item), set, [parent_key]},
         {shurbey_collection, record_info(fields, shurbey_collection), set, []},
         {shurbey_search, record_info(fields, shurbey_search), set, []},
         {shurbey_tag, record_info(fields, shurbey_tag), set, []},
@@ -37,7 +35,8 @@ ensure_tables() ->
         {shurbey_fulltext, record_info(fields, shurbey_fulltext), set, []},
         {shurbey_file_meta, record_info(fields, shurbey_file_meta), set, []},
         {shurbey_blob, record_info(fields, shurbey_blob), set, []},
-        {shurbey_user, record_info(fields, shurbey_user), set, []}
+        {shurbey_user, record_info(fields, shurbey_user), set, []},
+        {shurbey_item_collection, record_info(fields, shurbey_item_collection), bag, []}
     ],
     lists:foreach(fun({Name, Fields, Type, Indices}) ->
         case mnesia:create_table(Name, [
@@ -53,7 +52,8 @@ ensure_tables() ->
     ok = mnesia:wait_for_tables(
         [shurbey_library, shurbey_api_key, shurbey_item, shurbey_collection,
          shurbey_search, shurbey_tag, shurbey_setting, shurbey_deleted,
-         shurbey_fulltext, shurbey_file_meta, shurbey_blob, shurbey_user],
+         shurbey_fulltext, shurbey_file_meta, shurbey_blob, shurbey_user,
+         shurbey_item_collection],
         5000
     ).
 

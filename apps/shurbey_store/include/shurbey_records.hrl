@@ -14,7 +14,15 @@
     id            :: {LibraryId :: integer(), ItemKey :: binary()},
     version       :: integer(),
     data          :: map(),       %% full Zotero item as native map
-    deleted = false :: boolean()
+    deleted = false :: boolean(),
+    parent_key    :: binary() | undefined  %% denormalized from data.parentItem
+}).
+
+%% Denormalized index: which items belong to which collections.
+%% Bag table — key is {LibId, CollKey}, multiple rows per collection.
+-record(shurbey_item_collection, {
+    id            :: {LibraryId :: integer(), CollKey :: binary()},
+    item_key      :: binary()
 }).
 
 -record(shurbey_collection, {

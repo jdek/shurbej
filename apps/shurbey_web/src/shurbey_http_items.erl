@@ -36,7 +36,8 @@ handle(<<"GET">>, Req0, #{scope := single} = State) ->
     ItemKey = cowboy_req:binding(item_key, Req0),
     case shurbey_db:get_item(LibId, ItemKey) of
         {ok, Item} ->
-            ChildrenCounts = shurbey_db:count_item_children(LibId),
+            {ok, LibVersion} = shurbey_version:get(LibId),
+            ChildrenCounts = cached_children_counts(LibId, LibVersion),
             Body = shurbey_http_common:envelope_item(LibId, Item, ChildrenCounts),
             Req = shurbey_http_common:json_response(200, Body, Item#shurbey_item.version, Req0),
             {ok, Req, State};
@@ -190,7 +191,7 @@ respond_list(Format, _Items, _LibId, _LibVersion, Req0, State)
         <<"Export format '", Format/binary, "' is not supported by this server">>, Req0),
     {ok, Req, State};
 respond_list(_, Items, LibId, LibVersion, Req0, State) ->
-    ChildrenCounts = shurbey_db:count_item_children(LibId),
+    ChildrenCounts = cached_children_counts(LibId, LibVersion),
     Sorted = shurbey_http_common:sort_records(Items,
         shurbey_http_common:get_sort(Req0),
         shurbey_http_common:get_direction(Req0)),
@@ -293,8 +294,10 @@ cascade_delete(LibId, ItemKey, NewVersion) ->
     shurbey_db:mark_item_deleted(LibId, ItemKey, NewVersion),
     shurbey_db:record_deletion(LibId, <<"item">>, ItemKey, NewVersion),
     shurbey_db:delete_item_tags(LibId, ItemKey),
+    shurbey_db:delete_item_collections(LibId, ItemKey),
     shurbey_db:delete_fulltext(LibId, ItemKey),
     shurbey_db:delete_file_meta(LibId, ItemKey),
+    %% list_items_children now uses the parent_key secondary index — O(k) not O(n).
     Children = shurbey_db:list_items_children(LibId, ItemKey, 0),
     lists:foreach(fun(#shurbey_item{id = {_, ChildKey}}) ->
         cascade_delete(LibId, ChildKey, NewVersion)
@@ -310,12 +313,19 @@ ensure_key(_) -> #{<<"key">> => generate_key()}.
 write_item(LibId, Item, NewVersion) ->
     Key = maps:get(<<"key">>, Item),
     FullData = Item#{<<"version">> => NewVersion},
+    ParentKey = case maps:get(<<"parentItem">>, Item, false) of
+        P when is_binary(P) -> P;
+        _ -> undefined
+    end,
     shurbey_db:write_item(#shurbey_item{
         id = {LibId, Key},
         version = NewVersion,
         data = FullData,
-        deleted = false
+        deleted = false,
+        parent_key = ParentKey
     }),
+    Collections = maps:get(<<"collections">>, Item, []),
+    shurbey_db:set_item_collections(LibId, Key, Collections),
     Tags = maps:get(<<"tags">>, Item, []),
     TagPairs = [{maps:get(<<"tag">>, T, <<>>), maps:get(<<"type">>, T, 0)} || T <- Tags],
     shurbey_db:set_item_tags(LibId, Key, TagPairs).
@@ -363,3 +373,16 @@ generate_key() ->
 
 body_error(invalid_json) -> <<"Invalid JSON">>;
 body_error(body_too_large) -> <<"Request body too large">>.
+
+%% Cache children counts by {LibId, LibVersion} — computed at most once per write.
+cached_children_counts(LibId, LibVersion) ->
+    Key = {shurbey_children, LibId, LibVersion},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            Counts = shurbey_db:count_item_children(LibId),
+            catch persistent_term:erase({shurbey_children, LibId, LibVersion - 1}),
+            persistent_term:put(Key, Counts),
+            Counts;
+        Counts ->
+            Counts
+    end.

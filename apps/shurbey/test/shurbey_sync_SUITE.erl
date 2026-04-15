@@ -800,7 +800,7 @@ items_native_terms(Config) ->
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
     %% Read directly from Mnesia
-    [{shurbey_item, {1, Key}, _Version, Data, false}] =
+    [{shurbey_item, {1, Key}, _Version, Data, false, _ParentKey}] =
         mnesia:dirty_read(shurbey_item, {1, Key}),
     %% Data should be a map, not a binary/string
     ?assert(is_map(Data)),
