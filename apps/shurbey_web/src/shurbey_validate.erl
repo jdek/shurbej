@@ -3,25 +3,7 @@
 -export([item/1, collection/1, search/1, setting/2, key_format/1, item_types/0]).
 
 item_types() ->
-    case persistent_term:get(shurbey_item_types, undefined) of
-        undefined ->
-            Types = load_item_types(),
-            persistent_term:put(shurbey_item_types, Types),
-            Types;
-        Types -> Types
-    end.
-
-load_item_types() ->
-    SchemaPath = filename:join(code:priv_dir(shurbey_web), "schema.json"),
-    case file:read_file(SchemaPath) of
-        {ok, Json} ->
-            Schema = jiffy:decode(Json, [return_maps]),
-            [maps:get(<<"itemType">>, IT)
-             || IT <- maps:get(<<"itemTypes">>, Schema, [])];
-        {error, _} ->
-            %% Fallback if schema not found
-            [<<"book">>, <<"journalArticle">>, <<"note">>, <<"attachment">>]
-    end.
+    shurbey_schema_data:item_types().
 
 %% Validate an item map. Returns ok | {error, Reason}.
 item(Item) when is_map(Item) ->

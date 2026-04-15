@@ -22,7 +22,7 @@ websocket_init(#{api_key := ApiKey} = State) ->
     case ApiKey of
         undefined ->
             %% Multi-key connection — no auto-subscribe
-            Reply = jiffy:encode(#{<<"event">> => <<"connected">>, <<"retry">> => ?RETRY_MS}),
+            Reply = simdjson:encode(#{<<"event">> => <<"connected">>, <<"retry">> => ?RETRY_MS}),
             {reply, {text, Reply}, State#{subscriptions => #{}, single_key => false}};
         Key ->
             %% Single-key connection — auto-subscribe to user's library
@@ -30,7 +30,7 @@ websocket_init(#{api_key := ApiKey} = State) ->
                 {ok, UserId} ->
                     Topic = user_topic(UserId),
                     pg:join(?SCOPE, Topic, self()),
-                    Reply = jiffy:encode(#{
+                    Reply = simdjson:encode(#{
                         <<"event">> => <<"connected">>,
                         <<"retry">> => ?RETRY_MS,
                         <<"topics">> => [Topic]
@@ -44,7 +44,7 @@ websocket_init(#{api_key := ApiKey} = State) ->
 
 %% Client messages
 websocket_handle({text, Msg}, State) ->
-    case catch jiffy:decode(Msg, [return_maps]) of
+    case catch simdjson:decode(Msg) of
         #{<<"action">> := Action} = Payload ->
             handle_action(Action, Payload, State);
         _ ->
@@ -55,7 +55,7 @@ websocket_handle(_Frame, State) ->
 
 %% Topic updates from pg
 websocket_info({topic_updated, Topic, Version}, State) ->
-    Reply = jiffy:encode(#{
+    Reply = simdjson:encode(#{
         <<"event">> => <<"topicUpdated">>,
         <<"topic">> => Topic,
         <<"version">> => Version
@@ -84,7 +84,7 @@ handle_action(<<"createSubscriptions">>, #{<<"subscriptions">> := Subs}, State)
             {reply, {close, 4405, <<"Single-key connection cannot be modified">>}, State};
         false ->
             {ResultSubs, Errors, NewState} = process_creates(Subs, State),
-            Reply = jiffy:encode(#{
+            Reply = simdjson:encode(#{
                 <<"event">> => <<"subscriptionsCreated">>,
                 <<"subscriptions">> => ResultSubs,
                 <<"errors">> => Errors
@@ -99,7 +99,7 @@ handle_action(<<"deleteSubscriptions">>, #{<<"subscriptions">> := Subs}, State)
             {reply, {close, 4405, <<"Single-key connection cannot be modified">>}, State};
         false ->
             NewState = process_deletes(Subs, State),
-            Reply = jiffy:encode(#{
+            Reply = simdjson:encode(#{
                 <<"event">> => <<"subscriptionsDeleted">>
             }),
             {reply, {text, Reply}, NewState}

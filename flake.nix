@@ -8,12 +8,8 @@
         beamPackages.erlang
         erlang-language-platform
         libsodium
+        simdjson
         pkg-config
-        poppler-utils
-        zig
-        zvbi
-        wrk
-        # chrony
      ];
      formatter = pkgs: pkgs.alejandra;
   };

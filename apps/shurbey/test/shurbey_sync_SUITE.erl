@@ -965,7 +965,7 @@ session_login_flow(Config) ->
     {ok, {{_, 200, _}, _, PollBody}} =
         httpc:request(get, {Base ++ "/keys/sessions/" ++ binary_to_list(Token), []},
                       [], [{body_format, binary}]),
-    PollResult = jiffy:decode(PollBody, [return_maps]),
+    PollResult = simdjson:decode(PollBody),
     ?assertEqual(<<"completed">>, maps:get(<<"status">>, PollResult)),
     NewApiKey = maps:get(<<"apiKey">>, PollResult),
     ?assert(is_binary(NewApiKey)),
@@ -975,7 +975,7 @@ session_login_flow(Config) ->
         httpc:request(get, {Base ++ "/keys/current",
                             [{"Zotero-API-Key", binary_to_list(NewApiKey)}]},
                       [], [{body_format, binary}]),
-    KeysResult = jiffy:decode(KeysBody, [return_maps]),
+    KeysResult = simdjson:decode(KeysBody),
     ?assertEqual(1, maps:get(<<"userID">>, KeysResult)),
     ok.
 
@@ -986,12 +986,12 @@ session_poll_pending(Config) ->
         httpc:request(post, {Base ++ "/keys/sessions", [],
                              "application/json", <<"{}">>},
                       [], [{body_format, binary}]),
-    #{<<"sessionToken">> := Token} = jiffy:decode(Body, [return_maps]),
+    #{<<"sessionToken">> := Token} = simdjson:decode(Body),
     %% Poll before login — should be pending
     {ok, {{_, 200, _}, _, PollBody}} =
         httpc:request(get, {Base ++ "/keys/sessions/" ++ binary_to_list(Token), []},
                       [], [{body_format, binary}]),
-    ?assertEqual(#{<<"status">> => <<"pending">>}, jiffy:decode(PollBody, [return_maps])),
+    ?assertEqual(#{<<"status">> => <<"pending">>}, simdjson:decode(PollBody)),
     ok.
 
 session_cancel(Config) ->
@@ -1000,7 +1000,7 @@ session_cancel(Config) ->
         httpc:request(post, {Base ++ "/keys/sessions", [],
                              "application/json", <<"{}">>},
                       [], [{body_format, binary}]),
-    #{<<"sessionToken">> := Token} = jiffy:decode(Body, [return_maps]),
+    #{<<"sessionToken">> := Token} = simdjson:decode(Body),
     %% Cancel
     {ok, {{_, 204, _}, _, _}} =
         httpc:request(delete, {Base ++ "/keys/sessions/" ++ binary_to_list(Token), []},
@@ -1100,7 +1100,7 @@ item_template(Config) ->
     Base = ?config(base, Config),
     {ok, {{_, 200, _}, _, Body}} =
         httpc:request(get, {Base ++ "/items/new?itemType=book", []}, [], [{body_format, binary}]),
-    Template = jiffy:decode(Body, [return_maps]),
+    Template = simdjson:decode(Body),
     ?assertEqual(<<"book">>, maps:get(<<"itemType">>, Template)),
     ?assert(maps:is_key(<<"title">>, Template)),
     ?assert(maps:is_key(<<"creators">>, Template)),
@@ -1118,7 +1118,7 @@ schema_endpoint(Config) ->
     Base = ?config(base, Config),
     {ok, {{_, 200, _}, _, Body}} =
         httpc:request(get, {Base ++ "/schema", []}, [], [{body_format, binary}]),
-    Schema = jiffy:decode(Body, [return_maps]),
+    Schema = simdjson:decode(Body),
     ?assert(map_size(Schema) > 0),
     ok.
 
@@ -1131,7 +1131,7 @@ write_token_idempotent(Config) ->
     ApiKey = ?config(api_key, Config),
     Token = <<"test-write-token-", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Idempotent">>},
-    Body = jiffy:encode([Item]),
+    Body = simdjson:encode([Item]),
     Headers = [{"Zotero-API-Key", binary_to_list(ApiKey)},
                {"Zotero-Write-Token", binary_to_list(Token)}],
     %% First request
@@ -1142,8 +1142,8 @@ write_token_idempotent(Config) ->
     {ok, {{_, 200, _}, _, Resp2}} =
         httpc:request(post, {Base ++ "/users/1/items", Headers, "application/json", Body},
                       [], [{body_format, binary}]),
-    R1 = jiffy:decode(Resp1, [return_maps]),
-    R2 = jiffy:decode(Resp2, [return_maps]),
+    R1 = simdjson:decode(Resp1),
+    R2 = simdjson:decode(Resp2),
     ?assertEqual(maps:get(<<"successful">>, R1), maps:get(<<"successful">>, R2)),
     ok.
 
@@ -1381,12 +1381,12 @@ ws_login_flow(Config) ->
     after 5000 -> ct:fail("WebSocket upgrade timeout")
     end,
     %% Subscribe to login session
-    SubMsg = jiffy:encode(#{<<"action">> => <<"subscribe">>,
+    SubMsg = simdjson:encode(#{<<"action">> => <<"subscribe">>,
                             <<"topic">> => <<"login-session:", Token/binary>>}),
     gun:ws_send(Pid, StreamRef, {text, SubMsg}),
     %% Wait for subscribed confirmation
     receive {gun_ws, Pid, StreamRef, {text, SubResp}} ->
-        #{<<"event">> := <<"subscribed">>} = jiffy:decode(SubResp, [return_maps])
+        #{<<"event">> := <<"subscribed">>} = simdjson:decode(SubResp)
     after 5000 -> ct:fail("Subscribe timeout")
     end,
     %% Complete login via HTTP
@@ -1402,7 +1402,7 @@ ws_login_flow(Config) ->
                       [], [{body_format, binary}]),
     %% Should receive loginComplete over WebSocket
     receive {gun_ws, Pid, StreamRef, {text, EventMsg}} ->
-        Event = jiffy:decode(EventMsg, [return_maps]),
+        Event = simdjson:decode(EventMsg),
         ?assertEqual(<<"loginComplete">>, maps:get(<<"event">>, Event)),
         ?assert(maps:is_key(<<"apiKey">>, Event)),
         ?assertEqual(1, maps:get(<<"userID">>, Event))
@@ -1567,7 +1567,7 @@ settings_precondition(Config) ->
         httpc:request(post, {Base ++ "/users/1/settings",
             [{"Zotero-API-Key", binary_to_list(ApiKey)},
              {"If-Unmodified-Since-Version", "99999"}],
-            "application/json", jiffy:encode(#{<<"x">> => #{<<"value">> => 1}})},
+            "application/json", simdjson:encode(#{<<"x">> => #{<<"value">> => 1}})},
             [], [{body_format, binary}]),
     ok.
 
@@ -1601,7 +1601,7 @@ validation_bad_setting(Config) ->
     {ok, {{_, 400, _}, _, _}} =
         httpc:request(post, {Base ++ "/users/1/settings",
             [{"Zotero-API-Key", binary_to_list(ApiKey)}],
-            "application/json", jiffy:encode(#{<<>> => #{<<"value">> => 1}})},
+            "application/json", simdjson:encode(#{<<>> => #{<<"value">> => 1}})},
             [], [{body_format, binary}]),
     ok.
 
@@ -1811,7 +1811,7 @@ item_template_note(Config) ->
     Base = ?config(base, Config),
     {ok, {{_, 200, _}, _, Body}} =
         httpc:request(get, {Base ++ "/items/new?itemType=note", []}, [], [{body_format, binary}]),
-    T = jiffy:decode(Body, [return_maps]),
+    T = simdjson:decode(Body),
     ?assertEqual(<<"note">>, maps:get(<<"itemType">>, T)),
     ?assert(maps:is_key(<<"note">>, T)),
     ok.
@@ -1820,7 +1820,7 @@ item_template_attachment(Config) ->
     Base = ?config(base, Config),
     {ok, {{_, 200, _}, _, Body}} =
         httpc:request(get, {Base ++ "/items/new?itemType=attachment", []}, [], [{body_format, binary}]),
-    T = jiffy:decode(Body, [return_maps]),
+    T = simdjson:decode(Body),
     ?assertEqual(<<"attachment">>, maps:get(<<"itemType">>, T)),
     ?assert(maps:is_key(<<"filename">>, T)),
     ok.
@@ -1854,7 +1854,7 @@ create_session_with_csrf(Config) ->
         httpc:request(post, {Base ++ "/keys/sessions", [],
                              "application/json", <<"{}">>},
                       [], [{body_format, binary}]),
-    Session = jiffy:decode(SessionBody, [return_maps]),
+    Session = simdjson:decode(SessionBody),
     Token = maps:get(<<"sessionToken">>, Session),
     LoginUrl = maps:get(<<"loginURL">>, Session),
     {ok, {{_, 200, _}, _, LoginHtml}} =
@@ -1866,14 +1866,14 @@ get_json(Path, Config) ->
     request(get, Path, [], <<>>, Config, true).
 
 post_json(Path, Body, Config) ->
-    request(post, Path, [], jiffy:encode(Body), Config, true).
+    request(post, Path, [], simdjson:encode(Body), Config, true).
 
 post_json_with_version(Path, Body, Version, Config) ->
     Headers = [{"If-Unmodified-Since-Version", integer_to_list(Version)}],
-    request(post, Path, Headers, jiffy:encode(Body), Config, true).
+    request(post, Path, Headers, simdjson:encode(Body), Config, true).
 
 put_json(Path, Body, Config) ->
-    request(put, Path, [], jiffy:encode(Body), Config, true).
+    request(put, Path, [], simdjson:encode(Body), Config, true).
 
 delete_req(Path, Version, Config) ->
     Headers = [{"If-Unmodified-Since-Version", integer_to_list(Version)}],
@@ -1881,7 +1881,7 @@ delete_req(Path, Version, Config) ->
 
 put_json_versioned(Path, Body, Version, Config) ->
     Headers = [{"If-Unmodified-Since-Version", integer_to_list(Version)}],
-    request(put, Path, Headers, jiffy:encode(Body), Config, true).
+    request(put, Path, Headers, simdjson:encode(Body), Config, true).
 
 patch_json(Path, Body, Version, Config) ->
     Base = ?config(base, Config),
@@ -1891,13 +1891,13 @@ patch_json(Path, Body, Version, Config) ->
         httpc:request(patch, {Url,
             [{"Zotero-API-Key", binary_to_list(ApiKey)},
              {"If-Unmodified-Since-Version", integer_to_list(Version)}],
-            "application/json", jiffy:encode(Body)},
+            "application/json", simdjson:encode(Body)},
             [], [{body_format, binary}]),
     HeaderMap = maps:from_list([{list_to_binary(string:lowercase(K)), list_to_binary(V)}
                                 || {K, V} <- RespHeaders]),
     Decoded = case RespBody of
         <<>> -> #{};
-        _ -> try jiffy:decode(RespBody, [return_maps]) catch _:_ -> RespBody end
+        _ -> try simdjson:decode(RespBody) catch _:_ -> RespBody end
     end,
     {Status, HeaderMap, Decoded}.
 
@@ -1916,7 +1916,7 @@ post_form(Path, FormBody, ExtraHeaders, Config) ->
                                 || {K, V} <- RespHeaders]),
     Decoded = case RespBody of
         <<>> -> #{};
-        _ -> try jiffy:decode(RespBody, [return_maps]) catch _:_ -> RespBody end
+        _ -> try simdjson:decode(RespBody) catch _:_ -> RespBody end
     end,
     {Status, HeaderMap, Decoded}.
 
@@ -1963,7 +1963,7 @@ request(Method, Path, ExtraHeaders, ReqBody, Config, WithAuth) ->
             DecodedBody = case RespBody of
                 <<>> -> #{};
                 _ ->
-                    try jiffy:decode(RespBody, [return_maps])
+                    try simdjson:decode(RespBody)
                     catch _:_ -> RespBody
                     end
             end,

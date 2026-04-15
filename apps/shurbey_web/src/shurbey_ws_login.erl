@@ -13,10 +13,10 @@ websocket_init(State) ->
 
 %% Handle incoming messages from the client.
 websocket_handle({text, Msg}, State) ->
-    case catch jiffy:decode(Msg, [return_maps]) of
+    case catch simdjson:decode(Msg) of
         #{<<"action">> := <<"subscribe">>, <<"topic">> := <<"login-session:", Token/binary>>} ->
             shurbey_session:subscribe(Token, self()),
-            Reply = jiffy:encode(#{
+            Reply = simdjson:encode(#{
                 <<"event">> => <<"subscribed">>,
                 <<"topic">> => <<"login-session:", Token/binary>>
             }),
@@ -30,7 +30,7 @@ websocket_handle(_Frame, State) ->
 %% Handle messages from the session manager.
 websocket_info({session_event, {login_complete, ApiKey, UserInfo}}, State) ->
     #{user_id := UserId, username := Username} = UserInfo,
-    Reply = jiffy:encode(#{
+    Reply = simdjson:encode(#{
         <<"event">> => <<"loginComplete">>,
         <<"apiKey">> => ApiKey,
         <<"userID">> => UserId,
@@ -40,7 +40,7 @@ websocket_info({session_event, {login_complete, ApiKey, UserInfo}}, State) ->
     {reply, {text, Reply}, State};
 
 websocket_info({session_event, login_cancelled}, State) ->
-    Reply = jiffy:encode(#{<<"event">> => <<"loginCancelled">>}),
+    Reply = simdjson:encode(#{<<"event">> => <<"loginCancelled">>}),
     {reply, {text, Reply}, State};
 
 websocket_info(_Info, State) ->

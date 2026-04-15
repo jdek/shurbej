@@ -151,7 +151,7 @@ read_json_body(Req) ->
     case cowboy_req:read_body(Req, #{length => ?MAX_BODY_SIZE, period => 15000}) of
         {ok, Body, Req2} ->
             Decoded = maybe_decompress(Body, Req2),
-            try {ok, jiffy:decode(Decoded, [return_maps]), Req2}
+            try {ok, simdjson:decode(Decoded), Req2}
             catch _:_ -> {error, invalid_json, Req2}
             end;
         {more, _, Req2} ->
@@ -323,7 +323,7 @@ list_response(Req, Items, LibVersion, EnvelopeFn) ->
         <<"zotero-api-version">> => <<"3">>
     },
     Headers2 = add_link_headers(Headers, Req, Start, Limit, Total),
-    cowboy_req:reply(200, Headers2, jiffy:encode(Enveloped), Req).
+    cowboy_req:reply(200, Headers2, simdjson:encode(Enveloped), Req).
 
 add_link_headers(Headers, Req, Start, Limit, Total) ->
     Base = page_base_url(Req),
@@ -419,14 +419,14 @@ json_response(StatusCode, Body, Req) ->
     cowboy_req:reply(StatusCode, #{
         <<"content-type">> => <<"application/json">>,
         <<"zotero-api-version">> => <<"3">>
-    }, jiffy:encode(Body), Req).
+    }, simdjson:encode(Body), Req).
 
 json_response(StatusCode, Body, Version, Req) ->
     cowboy_req:reply(StatusCode, #{
         <<"content-type">> => <<"application/json">>,
         <<"last-modified-version">> => integer_to_binary(Version),
         <<"zotero-api-version">> => <<"3">>
-    }, jiffy:encode(Body), Req).
+    }, simdjson:encode(Body), Req).
 
 error_response(StatusCode, Message, Req) ->
     json_response(StatusCode, #{<<"message">> => Message}, Req).
@@ -436,7 +436,7 @@ auth_error_response(rate_limited, Req) ->
         <<"content-type">> => <<"application/json">>,
         <<"retry-after">> => <<"60">>,
         <<"zotero-api-version">> => <<"3">>
-    }, jiffy:encode(#{<<"message">> => <<"Rate limit exceeded. Try again later.">>}), Req);
+    }, simdjson:encode(#{<<"message">> => <<"Rate limit exceeded. Try again later.">>}), Req);
 auth_error_response(_, Req) ->
     error_response(403, <<"Forbidden">>, Req).
 

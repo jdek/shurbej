@@ -88,9 +88,7 @@ handle(creator_fields, Req0, State) ->
 %% Internal
 
 get_schema() ->
-    SchemaPath = filename:join(code:priv_dir(shurbey_web), "schema.json"),
-    {ok, SchemaJson} = file:read_file(SchemaPath),
-    jiffy:decode(SchemaJson, [return_maps]).
+    shurbey_schema_data:schema().
 
 find_item_type(Type, Schema) ->
     case [IT || IT <- maps:get(<<"itemTypes">>, Schema, []),

@@ -7,7 +7,7 @@
         kernel,
         stdlib,
         cowboy,
-        jiffy,
+        simdjsone,
         shurbey_store
     ]},
     {env, []},
