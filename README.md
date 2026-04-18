@@ -1,7 +1,7 @@
-# Shurbey
+# Shurbej
 
-[![Erlang CI](https://github.com/jdek/shurbey/actions/workflows/erlang.yml/badge.svg)](https://github.com/jdek/shurbey/actions/workflows/erlang.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/jdek/e28b9a35b796ab5996313c844f01ac59/raw/shurbey-coverage.json)](https://jdek.github.io/shurbey/)
+[![Erlang CI](https://github.com/jdek/shurbej/actions/workflows/erlang.yml/badge.svg)](https://github.com/jdek/shurbej/actions/workflows/erlang.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/jdek/e28b9a35b796ab5996313c844f01ac59/raw/shurbej-coverage.json)](https://jdek.github.io/shurbej/)
 
 Self-hosted Zotero sync server with basic web UI.
 
@@ -9,12 +9,12 @@ Self-hosted Zotero sync server with basic web UI.
 
 ```bash
 rebar3 release
-export SHURBEY_COOKIE=$(openssl rand -hex 32)
-./_build/default/rel/shurbey/bin/shurbey daemon
-./_build/default/rel/shurbey/bin/shurbey eval 'shurbey_admin:create_user(<<"name">>, <<"pass">>, 1).'
+export SHURBEJ_COOKIE=$(openssl rand -hex 32)
+./_build/default/rel/shurbej/bin/shurbej daemon
+./_build/default/rel/shurbej/bin/shurbej eval 'shurbej_admin:create_user(<<"name">>, <<"pass">>, 1).'
 ```
 
-Set `SHURBEY_COOKIE` to a random secret — it gates `eval`/`remote` access to the running node. Default is `change_me_in_production`.
+Set `SHURBEJ_COOKIE` to a random secret — it gates `eval`/`remote` access to the running node. Default is `change_me_in_production`.
 
 Point Zotero at `http://localhost:8080` in **Settings > Sync > Custom API URL**.
 
@@ -34,7 +34,7 @@ cd web && npm run build                 # prod served by cowboy on :8080
 
 ```erlang
 {http_port, 8080},
-{db_path, "./data/shurbey.db"},
+{db_path, "./data/shurbej.db"},
 {file_storage_path, "./data/files"},
 {base_url, "http://localhost:8080"}
 ```

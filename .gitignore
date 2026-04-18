@@ -21,4 +21,4 @@ rebar3.crashdump
 data/
 web/dist/
 web/node_modules/
-apps/shurbey_web/src/shurbey_schema_data.erl
+apps/shurbej_web/src/shurbej_schema_data.erl

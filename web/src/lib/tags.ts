@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 
 // Persisted tag colors: { [tag]: color }
-const COLORS_KEY = "shurbey_tag_colors";
+const COLORS_KEY = "shurbej_tag_colors";
 const stored = localStorage.getItem(COLORS_KEY);
 const [tagColors, setTagColorsRaw] = createSignal<Record<string, string>>(
   stored ? JSON.parse(stored) : {}

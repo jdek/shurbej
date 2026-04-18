@@ -58,7 +58,7 @@ export default function Login() {
   return (
     <div class="flex items-center justify-center h-screen bg-bg">
       <div class="bg-raised border border-border rounded-lg p-8 w-90">
-        <h1 class="text-xl font-semibold text-center mb-6">Shurbey</h1>
+        <h1 class="text-xl font-semibold text-center mb-6">Shurbej</h1>
 
         <div class="flex mb-5 border border-border rounded-md overflow-hidden text-sm">
           <button

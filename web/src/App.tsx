@@ -23,7 +23,7 @@ function Shell(props: { children?: any }) {
           class="text-base font-semibold mr-3 cursor-pointer"
           onClick={() => switchTab("library")}
         >
-          Shurbey
+          Shurbej
         </h1>
         <TabBar />
         <button class="ml-auto text-xs px-2 py-1 border border-border rounded hover:bg-surface shrink-0" onClick={logout}>

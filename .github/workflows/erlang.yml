@@ -43,7 +43,7 @@ jobs:
       with:
         auth: ${{ secrets.GIST_TOKEN }}
         gistID: ${{ vars.COVERAGE_GIST_ID }}
-        filename: shurbey-coverage.json
+        filename: shurbej-coverage.json
         label: coverage
         message: ${{ steps.coverage.outputs.percent }}%
         valColorRange: ${{ steps.coverage.outputs.percent }}

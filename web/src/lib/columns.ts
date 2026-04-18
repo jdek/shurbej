@@ -31,7 +31,7 @@ export interface ColumnState {
   width: number;
 }
 
-const STORAGE_KEY = "shurbey_columns_v3";
+const STORAGE_KEY = "shurbej_columns_v3";
 const stored = localStorage.getItem(STORAGE_KEY);
 
 const defaults: ColumnState[] = [

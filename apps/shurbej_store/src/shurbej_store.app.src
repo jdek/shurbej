@@ -1,0 +1,14 @@
+{application, shurbej_store, [
+    {description, "Shurbej data storage layer"},
+    {vsn, "0.1.0"},
+    {registered, [shurbej_store_sup]},
+    {mod, {shurbej_store_app, []}},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+]}.

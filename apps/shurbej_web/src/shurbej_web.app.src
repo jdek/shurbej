@@ -1,0 +1,17 @@
+{application, shurbej_web, [
+    {description, "Shurbej HTTP/WebSocket layer"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {shurbej_web_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        cowboy,
+        simdjsone,
+        shurbej_store
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+]}.

@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 
-const STORAGE_KEY = "shurbey_api_key";
-const USER_ID_KEY = "shurbey_user_id";
+const STORAGE_KEY = "shurbej_api_key";
+const USER_ID_KEY = "shurbej_user_id";
 
 const stored = localStorage.getItem(STORAGE_KEY);
 const storedUserId = localStorage.getItem(USER_ID_KEY);
