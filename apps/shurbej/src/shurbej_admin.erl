@@ -17,17 +17,64 @@
 %% ===================================================================
 
 create_user(Username, Password) when is_binary(Username), is_binary(Password) ->
-    UserId = next_user_id(),
-    create_user(Username, Password, UserId).
+    %% Allocate user_id and insert in one transaction so two concurrent
+    %% admin calls can't race into the same id.
+    Result = mnesia:transaction(fun() ->
+        case mnesia:read(shurbej_user, Username) of
+            [_] -> {error, already_exists};
+            [] ->
+                UserId = tx_next_user_id(),
+                tx_create_user(Username, Password, UserId),
+                {ok, UserId}
+        end
+    end),
+    case Result of
+        {atomic, {ok, UserId}} ->
+            logger:notice("created user ~s (user_id=~p)", [Username, UserId]),
+            ok;
+        {atomic, {error, _} = Err} ->
+            Err
+    end.
 
 create_user(Username, Password, UserId) when is_binary(Username), is_binary(Password) ->
-    case shurbej_db:get_user(Username) of
-        {ok, _} ->
-            {error, already_exists};
-        undefined ->
-            ok = shurbej_db:create_user(Username, Password, UserId),
+    Result = mnesia:transaction(fun() ->
+        case mnesia:read(shurbej_user, Username) of
+            [_] -> {error, already_exists};
+            [] ->
+                tx_create_user(Username, Password, UserId),
+                ok
+        end
+    end),
+    case Result of
+        {atomic, ok} ->
             logger:notice("created user ~s (user_id=~p)", [Username, UserId]),
-            ok
+            ok;
+        {atomic, {error, _} = Err} ->
+            Err
+    end.
+
+%% Mirror shurbej_db:create_user's writes without its own transaction wrapper
+%% so the caller's transaction stays single-level.
+tx_create_user(Username, Password, UserId) ->
+    Salt = crypto:strong_rand_bytes(16),
+    Hash = shurbej_db:hash_password(Password, Salt),
+    mnesia:write(#shurbej_user{
+        username = Username,
+        password_hash = Hash,
+        salt = Salt,
+        user_id = UserId
+    }),
+    LibRef = {user, UserId},
+    case mnesia:read(shurbej_library, LibRef) of
+        [] -> mnesia:write(#shurbej_library{ref = LibRef, version = 0});
+        _ -> ok
+    end.
+
+tx_next_user_id() ->
+    MS = ets:fun2ms(fun(#shurbej_user{user_id = Id}) -> Id end),
+    case mnesia:select(shurbej_user, MS) of
+        [] -> 1;
+        Ids -> lists:max(Ids) + 1
     end.
 
 list_users() ->
@@ -38,12 +85,6 @@ list_users() ->
 delete_user(Username) ->
     mnesia:dirty_delete({shurbej_user, Username}).
 
-next_user_id() ->
-    MS = ets:fun2ms(fun(#shurbej_user{user_id = Id}) -> Id end),
-    case mnesia:dirty_select(shurbej_user, MS) of
-        [] -> 1;
-        Ids -> lists:max(Ids) + 1
-    end.
 
 %% ===================================================================
 %% API keys
@@ -93,7 +134,8 @@ create_group(Name, OwnerUserId, Type) ->
 %% Opts: description, url, library_editing, library_reading, file_editing.
 create_group(Name, OwnerUserId, Type, Opts)
         when is_binary(Name), is_integer(OwnerUserId),
-             Type =:= private; Type =:= public_closed; Type =:= public_open ->
+             (Type =:= private orelse Type =:= public_closed
+              orelse Type =:= public_open) ->
     create_group_1(Name, OwnerUserId, Type, Opts);
 create_group(_, _, Type, _) ->
     {error, {bad_type, Type}}.
@@ -102,36 +144,45 @@ create_group_1(Name, OwnerUserId, Type, Opts) ->
     case shurbej_db:get_user_by_id(OwnerUserId) of
         undefined -> {error, owner_not_found};
         {ok, _} ->
-            GroupId = next_group_id(),
             LibEd = maps:get(library_editing, Opts, members),
             LibRd = maps:get(library_reading, Opts, members),
             FileEd = maps:get(file_editing, Opts, admins),
-            Group = #shurbej_group{
-                group_id = GroupId,
-                name = Name,
-                owner_id = OwnerUserId,
-                type = Type,
-                description = maps:get(description, Opts, <<>>),
-                url = maps:get(url, Opts, <<>>),
-                has_image = false,
-                library_editing = LibEd,
-                library_reading = LibRd,
-                file_editing = FileEd,
-                created = erlang:system_time(second),
-                version = 0
-            },
-            {atomic, ok} = mnesia:transaction(fun() ->
-                mnesia:write(Group),
+            %% Allocate group_id and write within a single transaction so
+            %% concurrent creates can't collide on the same id.
+            {atomic, GroupId} = mnesia:transaction(fun() ->
+                Gid = tx_next_group_id(),
+                mnesia:write(#shurbej_group{
+                    group_id = Gid,
+                    name = Name,
+                    owner_id = OwnerUserId,
+                    type = Type,
+                    description = maps:get(description, Opts, <<>>),
+                    url = maps:get(url, Opts, <<>>),
+                    has_image = false,
+                    library_editing = LibEd,
+                    library_reading = LibRd,
+                    file_editing = FileEd,
+                    created = erlang:system_time(second),
+                    version = 0
+                }),
                 mnesia:write(#shurbej_group_member{
-                    id = {GroupId, OwnerUserId}, role = owner
+                    id = {Gid, OwnerUserId}, role = owner
                 }),
                 mnesia:write(#shurbej_library{
-                    ref = {group, GroupId}, version = 0
-                })
+                    ref = {group, Gid}, version = 0
+                }),
+                Gid
             end),
             logger:notice("created group ~s (group_id=~p, owner=~p)",
                           [Name, GroupId, OwnerUserId]),
             {ok, GroupId}
+    end.
+
+tx_next_group_id() ->
+    MS = ets:fun2ms(fun(#shurbej_group{group_id = Id}) -> Id end),
+    case mnesia:select(shurbej_group, MS) of
+        [] -> 1;
+        Ids -> lists:max(Ids) + 1
     end.
 
 delete_group(GroupId) when is_integer(GroupId) ->
@@ -143,7 +194,7 @@ list_groups() ->
 
 add_member(GroupId, UserId, Role)
         when is_integer(GroupId), is_integer(UserId),
-             Role =:= owner; Role =:= admin; Role =:= member ->
+             (Role =:= owner orelse Role =:= admin orelse Role =:= member) ->
     case {shurbej_db:get_group(GroupId), shurbej_db:get_user_by_id(UserId)} of
         {undefined, _} -> {error, group_not_found};
         {_, undefined} -> {error, user_not_found};
@@ -164,9 +215,3 @@ list_user_groups(UserId) ->
     [{G, R} || #shurbej_group_member{id = {G, _}, role = R}
                <- shurbej_db:list_user_groups(UserId)].
 
-next_group_id() ->
-    MS = ets:fun2ms(fun(#shurbej_group{group_id = Id}) -> Id end),
-    case mnesia:dirty_select(shurbej_group, MS) of
-        [] -> 1;
-        Ids -> lists:max(Ids) + 1
-    end.

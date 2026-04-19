@@ -7,6 +7,7 @@
     get_library/1, ensure_library/1, update_library_version/2,
     %% Users
     create_user/3, authenticate_user/2, get_user/1, get_user_by_id/1, delete_key/1,
+    hash_password/2,
     %% API keys
     verify_key/1, get_key_info/1, create_key/3, has_any_key/0,
     %% Items
