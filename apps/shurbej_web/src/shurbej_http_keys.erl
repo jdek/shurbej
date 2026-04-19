@@ -153,7 +153,7 @@ handle_get_by_key(Req0, State) ->
                 <<"displayName">> => Username,
                 <<"access">> => format_access(RawPerms)
             },
-            {ok, Version} = shurbej_version:get(UserId),
+            {ok, Version} = shurbej_version:get({user, UserId}),
             Req = shurbej_http_common:json_response(200, Body, Version, Req0),
             {ok, Req, State};
         {error, invalid} ->

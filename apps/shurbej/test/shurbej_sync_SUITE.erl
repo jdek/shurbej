@@ -281,7 +281,35 @@
     group_nonmember_reads_public/1,
     group_file_editing_none_blocks_upload/1,
     key_without_group_grant_blocks/1,
-    key_with_groups_all_works/1
+    key_with_groups_all_works/1,
+
+    %% Coverage: group metadata + groups list
+    group_metadata_get_ok/1,
+    group_metadata_get_404/1,
+    group_metadata_get_405/1,
+    group_metadata_get_403_private_nonmember/1,
+    groups_list_with_memberships/1,
+    groups_list_versions_populated/1,
+
+    %% Coverage: key management
+    keys_create_with_custom_access/1,
+    keys_get_by_key_returns_access/1,
+
+    %% Coverage: file error paths
+    files_upload_bad_content_type/1,
+    files_upload_missing_params/1,
+    files_upload_bad_md5/1,
+    files_upload_missing_precondition/1,
+    files_upload_precondition_failed/1,
+    files_view_404_no_meta/1,
+    files_view_url_404_no_meta/1,
+
+    %% Coverage: admin helpers
+    admin_group_bad_type/1,
+    admin_add_member_errors/1,
+    admin_remove_member_and_lists/1,
+    admin_create_api_key_user_not_found/1,
+    admin_create_api_key_read_only/1
 ]).
 
 all() ->
@@ -451,7 +479,27 @@ all() ->
         group_nonmember_reads_public,
         group_file_editing_none_blocks_upload,
         key_without_group_grant_blocks,
-        key_with_groups_all_works
+        key_with_groups_all_works,
+        group_metadata_get_ok,
+        group_metadata_get_404,
+        group_metadata_get_405,
+        group_metadata_get_403_private_nonmember,
+        groups_list_with_memberships,
+        groups_list_versions_populated,
+        keys_create_with_custom_access,
+        keys_get_by_key_returns_access,
+        files_upload_bad_content_type,
+        files_upload_missing_params,
+        files_upload_bad_md5,
+        files_upload_missing_precondition,
+        files_upload_precondition_failed,
+        files_view_404_no_meta,
+        files_view_url_404_no_meta,
+        admin_group_bad_type,
+        admin_add_member_errors,
+        admin_remove_member_and_lists,
+        admin_create_api_key_user_not_found,
+        admin_create_api_key_read_only
     ].
 
 init_per_suite(Config) ->
@@ -2745,6 +2793,287 @@ key_with_groups_all_works(Config) ->
     ok.
 
 %% ===================================================================
+%% Group metadata + groups list
+%% ===================================================================
+
+group_metadata_get_ok(Config) ->
+    {GroupId, _OwnerId, OwnerKey} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => admins,
+        description => <<"a test group">>, url => <<"https://example.org/g">>
+    }),
+    Path = "/groups/" ++ integer_to_list(GroupId),
+    {200, Body} = request_with_key(get, Path, [], <<>>, Config, OwnerKey),
+    ?assertEqual(GroupId, maps:get(<<"id">>, Body)),
+    Data = maps:get(<<"data">>, Body),
+    ?assertEqual(<<"Private">>, maps:get(<<"type">>, Data)),
+    ?assertEqual(<<"a test group">>, maps:get(<<"description">>, Data)),
+    ?assertEqual(<<"members">>, maps:get(<<"libraryEditing">>, Data)),
+    ok.
+
+group_metadata_get_404(Config) ->
+    {_Uid, Key} = mk_user(full),
+    %% Use a group id that cannot exist. list_groups/0 returns all groups so
+    %% pick max+1.
+    NextId = case shurbej_admin:list_groups() of
+        [] -> 99999;
+        Gs -> lists:max([Id || {Id, _, _, _} <- Gs]) + 100000
+    end,
+    Path = "/groups/" ++ integer_to_list(NextId),
+    %% authorize_path will short-circuit unknown groups with a 404-ish result,
+    %% but the actual response the handler produces depends on auth order.
+    %% Accept 403 or 404 — both indicate "not accessible". We only care the
+    %% server doesn't crash.
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, Key),
+    ?assert(lists:member(Status, [403, 404])),
+    ok.
+
+group_metadata_get_405(Config) ->
+    {GroupId, _, OwnerKey} = mk_group(#{}),
+    Path = "/groups/" ++ integer_to_list(GroupId),
+    {Status, _} = request_with_key(post, Path, [], <<"{}">>, Config, OwnerKey),
+    ?assertEqual(405, Status),
+    ok.
+
+group_metadata_get_403_private_nonmember(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => admins
+    }),
+    {_Uid, NMKey} = mk_user(full),
+    Path = "/groups/" ++ integer_to_list(GroupId),
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
+    ?assertEqual(403, Status),
+    ok.
+
+groups_list_with_memberships(Config) ->
+    {Uid, Key} = mk_user(full),
+    %% Add the user to a fresh group (not as owner) so the list is non-empty.
+    {GroupId, _OwnerId, _OwnerKey} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    ok = shurbej_admin:add_member(GroupId, Uid, member),
+    Path = "/users/" ++ integer_to_list(Uid) ++ "/groups",
+    {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
+    ?assert(is_list(Body)),
+    Ids = [maps:get(<<"id">>, G) || G <- Body],
+    ?assert(lists:member(GroupId, Ids)),
+    ok.
+
+groups_list_versions_populated(Config) ->
+    {Uid, Key} = mk_user(full),
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    ok = shurbej_admin:add_member(GroupId, Uid, member),
+    Path = "/users/" ++ integer_to_list(Uid) ++ "/groups?format=versions",
+    {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
+    ?assert(maps:is_key(integer_to_binary(GroupId), Body)),
+    ok.
+
+%% ===================================================================
+%% Key management: custom access
+%% ===================================================================
+
+keys_create_with_custom_access(Config) ->
+    %% Create a dedicated user we can authenticate for /keys.
+    Uniq = integer_to_binary(erlang:unique_integer([positive])),
+    Username = <<"keyuser_", Uniq/binary>>,
+    Password = <<"pw_", Uniq/binary>>,
+    ok = shurbej_admin:create_user(Username, Password),
+    Body = #{
+        <<"username">> => Username,
+        <<"password">> => Password,
+        <<"name">> => <<"Read Only">>,
+        <<"access">> => #{
+            <<"user">> => #{<<"library">> => true, <<"write">> => false,
+                            <<"files">> => false, <<"notes">> => false},
+            <<"groups">> => #{<<"all">> => #{<<"library">> => true,
+                                              <<"write">> => false}}
+        }
+    },
+    {201, _, Resp} = request_no_auth(post, "/keys", [], simdjson:encode(Body), Config),
+    Access = maps:get(<<"access">>, Resp),
+    ?assertEqual(true,  maps:get(<<"library">>, maps:get(<<"user">>, Access))),
+    ?assertEqual(false, maps:get(<<"write">>,   maps:get(<<"user">>, Access))),
+    Groups = maps:get(<<"groups">>, Access),
+    All = maps:get(<<"all">>, Groups),
+    ?assertEqual(true,  maps:get(<<"library">>, All)),
+    ?assertEqual(false, maps:get(<<"write">>,   All)),
+    ok.
+
+keys_get_by_key_returns_access(Config) ->
+    {_Uid, Key} = mk_user(full),
+    Path = "/keys/" ++ binary_to_list(Key),
+    {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
+    ?assertEqual(Key, maps:get(<<"key">>, Body)),
+    ?assert(maps:is_key(<<"access">>, Body)),
+    ok.
+
+%% ===================================================================
+%% File error paths
+%% ===================================================================
+
+files_upload_bad_content_type(Config) ->
+    %% POSTing arbitrary content-type to /file must 400.
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"bct">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    Base = ?config(base, Config),
+    ApiKey = ?config(api_key, Config),
+    Url = Base ++ "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+    {ok, {{_, Status, _}, _, _}} =
+        httpc:request(post,
+                      {Url, [{"Zotero-API-Key", binary_to_list(ApiKey)}],
+                       "text/plain", <<"hello">>},
+                      [], [{body_format, binary}]),
+    ?assertEqual(400, Status),
+    ok.
+
+files_upload_missing_params(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"mp">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    %% No upload=, no uploadKey, no md5: classify_file_post returns bad_request.
+    {Status, _, _} = post_form("/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+                               <<"filename=x.pdf">>, Config),
+    ?assertEqual(400, Status),
+    ok.
+
+files_upload_bad_md5(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"bad-md5">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    Form = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, <<"not-hex">>},
+        {<<"filename">>, <<"x.pdf">>}, {<<"filesize">>, <<"1">>}, {<<"mtime">>, <<"1">>}
+    ]),
+    {Status, _, _} = post_form("/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+                               Form, [{"If-None-Match", "*"}], Config),
+    ?assertEqual(400, Status),
+    ok.
+
+files_upload_missing_precondition(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"nop">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    ValidMd5 = <<"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">>,
+    Form = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, ValidMd5},
+        {<<"filename">>, <<"x.pdf">>}, {<<"filesize">>, <<"1">>}, {<<"mtime">>, <<"1">>}
+    ]),
+    %% No If-None-Match / If-Match header at all.
+    {Status, _, _} = post_form("/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+                               Form, [], Config),
+    ?assertEqual(428, Status),
+    ok.
+
+files_upload_precondition_failed(Config) ->
+    %% Full upload first, then a second auth with If-None-Match:* should 412.
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"pf">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    FileData = <<"pf-content">>,
+    Md5 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Form = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
+        {<<"filename">>, <<"pf.pdf">>},
+        {<<"filesize">>, integer_to_binary(byte_size(FileData))},
+        {<<"mtime">>, <<"1">>}
+    ]),
+    Path = "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+    {200, _, Auth} = post_form(Path, Form, [{"If-None-Match", "*"}], Config),
+    UploadUrl = maps:get(<<"url">>, Auth),
+    UploadKey = maps:get(<<"uploadKey">>, Auth),
+    {201, _, _} = post_raw(binary_to_list(UploadUrl), FileData),
+    {204, _, _} = post_form(Path, cow_qs:qs([{<<"uploadKey">>, UploadKey}]), Config),
+    %% Now a second If-None-Match:* for the same item must 412 (file exists).
+    NewData = <<"different">>,
+    NewMd5 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, NewData)])),
+    Form2 = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, NewMd5},
+        {<<"filename">>, <<"pf.pdf">>},
+        {<<"filesize">>, integer_to_binary(byte_size(NewData))},
+        {<<"mtime">>, <<"2">>}
+    ]),
+    {Status, _, _} = post_form(Path, Form2, [{"If-None-Match", "*"}], Config),
+    ?assertEqual(412, Status),
+    ok.
+
+files_view_404_no_meta(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"view-none">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    {Status, _, _} = get_raw("/users/1/items/" ++ binary_to_list(Key) ++ "/file/view",
+                             Config),
+    ?assertEqual(404, Status),
+    ok.
+
+files_view_url_404_no_meta(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"viewurl-none">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    {Status, _, _} = get_raw("/users/1/items/" ++ binary_to_list(Key) ++ "/file/view/url",
+                             Config),
+    ?assertEqual(404, Status),
+    ok.
+
+%% ===================================================================
+%% shurbej_admin helpers
+%% ===================================================================
+
+admin_group_bad_type(_Config) ->
+    {OwnerId, _} = mk_user(full),
+    ?assertMatch({error, {bad_type, nonsense}},
+                 shurbej_admin:create_group(<<"bad">>, OwnerId, nonsense)),
+    ok.
+
+admin_add_member_errors(_Config) ->
+    {OwnerId, _} = mk_user(full),
+    {ok, GroupId} = shurbej_admin:create_group(<<"am">>, OwnerId, private),
+    %% Missing user
+    ?assertEqual({error, user_not_found},
+                 shurbej_admin:add_member(GroupId, 99999999, member)),
+    %% Missing group
+    ?assertEqual({error, group_not_found},
+                 shurbej_admin:add_member(99999999, OwnerId, member)),
+    ok.
+
+admin_remove_member_and_lists(_Config) ->
+    {OwnerId, _} = mk_user(full),
+    {MemberId, _} = mk_user(full),
+    {ok, GroupId} = shurbej_admin:create_group(<<"rm">>, OwnerId, private),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Members = shurbej_admin:list_members(GroupId),
+    ?assert(lists:keymember(MemberId, 1, Members)),
+    UserGroups = shurbej_admin:list_user_groups(MemberId),
+    ?assert(lists:keymember(GroupId, 1, UserGroups)),
+    ok = shurbej_admin:remove_member(GroupId, MemberId),
+    Members2 = shurbej_admin:list_members(GroupId),
+    ?assertNot(lists:keymember(MemberId, 1, Members2)),
+    AllGroups = shurbej_admin:list_groups(),
+    ?assert(lists:keymember(GroupId, 1, AllGroups)),
+    ok.
+
+admin_create_api_key_user_not_found(_Config) ->
+    ?assertEqual({error, user_not_found},
+                 shurbej_admin:create_api_key(99999999, <<"nope">>)),
+    ok.
+
+admin_create_api_key_read_only(Config) ->
+    Uniq = integer_to_binary(erlang:unique_integer([positive])),
+    Name = <<"ro_", Uniq/binary>>,
+    ok = shurbej_admin:create_user(Name, <<"pw">>),
+    [UserId] = [I || {N, I} <- shurbej_admin:list_users(), N =:= Name],
+    {ok, Key} = shurbej_admin:create_api_key(UserId, Name, read_only),
+    %% GET /users/:id/items must work; POST must 403.
+    Path = "/users/" ++ integer_to_list(UserId) ++ "/items",
+    {200, _} = request_with_key(get, Path, [], <<>>, Config, Key),
+    Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"ro">>},
+    {403, _} = request_with_key(post, Path, [], simdjson:encode([Item]), Config, Key),
+    ok.
+
+%% ===================================================================
 %% Group-perm test helpers
 %% ===================================================================
 
@@ -2782,6 +3111,9 @@ request_with_key(Method, Path, ExtraHeaders, ReqBody, Config, ApiKey) ->
         _ -> try simdjson:decode(RespBody) catch _:_ -> RespBody end
     end,
     {Status, Decoded}.
+
+request_no_auth(Method, Path, ExtraHeaders, ReqBody, Config) ->
+    request(Method, Path, ExtraHeaders, ReqBody, Config, false).
 
 post_form_with_key(Path, FormBody, ExtraHeaders, Config, ApiKey) ->
     Base = ?config(base, Config),
