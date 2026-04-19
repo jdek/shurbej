@@ -54,6 +54,7 @@
 ]).
 
 -define(MAX_BODY_SIZE, 8_000_000). %% 8MB
+-define(MAX_DECOMPRESSED_SIZE, 32_000_000). %% 32MB — cap for gzip expansion
 
 %% ===================================================================
 %% Authentication & Authorization
@@ -321,9 +322,12 @@ safe_int(_) -> error.
 read_json_body(Req) ->
     case cowboy_req:read_body(Req, #{length => ?MAX_BODY_SIZE, period => 15000}) of
         {ok, Body, Req2} ->
-            Decoded = maybe_decompress(Body, Req2),
-            try {ok, simdjson:decode(Decoded), Req2}
-            catch _:_ -> {error, invalid_json, Req2}
+            case maybe_decompress(Body, Req2) of
+                {error, Reason} -> {error, Reason, Req2};
+                Decoded ->
+                    try {ok, simdjson:decode(Decoded), Req2}
+                    catch _:_ -> {error, invalid_json, Req2}
+                    end
             end;
         {more, _, Req2} ->
             {error, body_too_large, Req2}
@@ -743,13 +747,39 @@ group_type_to_binary(private) -> <<"Private">>;
 group_type_to_binary(public_closed) -> <<"PublicClosed">>;
 group_type_to_binary(public_open) -> <<"PublicOpen">>.
 
+%% Zlib's gunzip/1 allocates the entire decompressed output — a tiny gzip
+%% bomb (10KB in, 1GB out) would OOM the handler. Inflate incrementally and
+%% refuse past MAX_DECOMPRESSED_SIZE.
 maybe_decompress(Body, Req) ->
     case cowboy_req:header(<<"content-encoding">>, Req) of
-        <<"gzip">> ->
-            try zlib:gunzip(Body)
-            catch _:_ -> Body
-            end;
+        <<"gzip">> -> gunzip_bounded(Body, ?MAX_DECOMPRESSED_SIZE);
         _ -> Body
+    end.
+
+gunzip_bounded(Bin, Max) ->
+    Z = zlib:open(),
+    %% 31 = gzip auto-detect window
+    ok = zlib:inflateInit(Z, 31),
+    try inflate_loop(Z, Bin, Max, [], 0)
+    catch _:_ -> {error, body_too_large}
+    after
+        zlib:close(Z)
+    end.
+
+inflate_loop(Z, In, Max, Acc, Size) ->
+    case zlib:safeInflate(Z, In) of
+        {continue, Out} ->
+            NewSize = Size + iolist_size(Out),
+            case NewSize > Max of
+                true -> {error, body_too_large};
+                false -> inflate_loop(Z, <<>>, Max, [Out | Acc], NewSize)
+            end;
+        {finished, Out} ->
+            NewSize = Size + iolist_size(Out),
+            case NewSize > Max of
+                true -> {error, body_too_large};
+                false -> iolist_to_binary(lists:reverse([Out | Acc]))
+            end
     end.
 
 to_binary(B) when is_binary(B) -> B;

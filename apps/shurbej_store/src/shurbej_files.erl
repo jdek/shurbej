@@ -41,9 +41,17 @@ get_pending(UploadKey) ->
 
 %% Store file data to disk. Verifies MD5 and computes SHA-256.
 %% Zotero sends files as ZIP-compressed. Extract first, then verify MD5.
+%% Caps the decompressed payload so a zip bomb can't OOM the node.
 store(UploadKey, #{meta := Meta} = _Info, Data) ->
     #{md5 := ExpectedMd5} = Meta,
-    FileData = maybe_unzip(Data),
+    case maybe_unzip(Data, max_file_bytes()) of
+        {error, _} = Err ->
+            Err;
+        FileData ->
+            store_unpacked(UploadKey, ExpectedMd5, FileData)
+    end.
+
+store_unpacked(UploadKey, ExpectedMd5, FileData) ->
     ActualMd5 = hex_hash(md5, FileData),
     case ActualMd5 of
         ExpectedMd5 ->
@@ -191,18 +199,25 @@ delete_blob_file(Hash) ->
     file:delete(blob_path(Hash)).
 
 %% If the data is a ZIP archive, extract the first file from it.
-%% Zotero ZFS compresses files into ZIP before uploading.
-maybe_unzip(<<80, 75, 3, 4, _/binary>> = ZipData) ->
+%% Zotero ZFS compresses files into ZIP before uploading. A post-decompression
+%% size check catches zip bombs — we can't refuse to allocate in zip:unzip, but
+%% we can reject the result before writing it to disk.
+maybe_unzip(<<80, 75, 3, 4, _/binary>> = ZipData, Max) ->
     case zip:unzip(ZipData, [memory]) of
-        {ok, [{_Filename, Content}]} ->
-            Content;
+        {ok, [{_Filename, Content} | _Rest]} when byte_size(Content) > Max ->
+            {error, zip_too_large};
         {ok, [{_Filename, Content} | _Rest]} ->
             Content;
         _ ->
             ZipData  %% fallback: treat as raw
     end;
-maybe_unzip(Data) ->
+maybe_unzip(Data, Max) when byte_size(Data) > Max ->
+    {error, zip_too_large};
+maybe_unzip(Data, _Max) ->
     Data.
+
+max_file_bytes() ->
+    application:get_env(shurbej, max_upload_bytes, 100 * 1024 * 1024).
 
 hex_hash(Algorithm, Data) ->
     binary:encode_hex(crypto:hash(Algorithm, Data), lowercase).
