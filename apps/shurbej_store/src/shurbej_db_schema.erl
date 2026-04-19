@@ -36,7 +36,9 @@ ensure_tables() ->
         {shurbej_file_meta, record_info(fields, shurbej_file_meta), set, []},
         {shurbej_blob, record_info(fields, shurbej_blob), set, []},
         {shurbej_user, record_info(fields, shurbej_user), set, []},
-        {shurbej_item_collection, record_info(fields, shurbej_item_collection), bag, []}
+        {shurbej_item_collection, record_info(fields, shurbej_item_collection), bag, []},
+        {shurbej_group, record_info(fields, shurbej_group), set, [owner_id]},
+        {shurbej_group_member, record_info(fields, shurbej_group_member), set, []}
     ],
     lists:foreach(fun({Name, Fields, Type, Indices}) ->
         case mnesia:create_table(Name, [
@@ -53,7 +55,7 @@ ensure_tables() ->
         [shurbej_library, shurbej_api_key, shurbej_item, shurbej_collection,
          shurbej_search, shurbej_tag, shurbej_setting, shurbej_deleted,
          shurbej_fulltext, shurbej_file_meta, shurbej_blob, shurbej_user,
-         shurbej_item_collection],
+         shurbej_item_collection, shurbej_group, shurbej_group_member],
         5000
     ).
 

@@ -4,7 +4,7 @@
 
 -export([
     %% Libraries
-    get_library/1, update_library_version/2,
+    get_library/1, ensure_library/1, update_library_version/2,
     %% Users
     create_user/3, authenticate_user/2, get_user/1, get_user_by_id/1, delete_key/1,
     %% API keys
@@ -33,23 +33,36 @@
     %% File metadata
     get_file_meta/2, write_file_meta/1, delete_file_meta/2,
     %% Blobs (content-addressed)
-    blob_exists/1, blob_ref/1, blob_unref/1
+    blob_exists/1, blob_ref/1, blob_unref/1,
+    %% Groups
+    get_group/1, list_groups/0, write_group/1, delete_group/1,
+    add_group_member/3, remove_group_member/2, get_group_member/2,
+    list_group_members/1, list_user_groups/1
 ]).
 
 %% ===================================================================
 %% Libraries
 %% ===================================================================
 
-get_library(LibId) ->
-    case db_read(shurbej_library, LibId) of
+get_library(LibRef) ->
+    case db_read(shurbej_library, LibRef) of
         [Lib] -> {ok, Lib};
         [] -> undefined
     end.
 
-update_library_version(LibId, NewVersion) ->
-    db_write(#shurbej_library{
-        library_id = LibId, library_type = user, version = NewVersion
-    }).
+%% Ensure a library row exists — idempotent, called on user/group creation
+%% and lazily on first access.
+ensure_library(LibRef) ->
+    {atomic, ok} = mnesia:transaction(fun() ->
+        case mnesia:read(shurbej_library, LibRef) of
+            [] -> mnesia:write(#shurbej_library{ref = LibRef, version = 0});
+            _ -> ok
+        end
+    end),
+    ok.
+
+update_library_version(LibRef, NewVersion) ->
+    db_write(#shurbej_library{ref = LibRef, version = NewVersion}).
 
 %% ===================================================================
 %% Users
@@ -65,11 +78,9 @@ create_user(Username, Password, UserId) ->
             salt = Salt,
             user_id = UserId
         }),
-        case mnesia:read(shurbej_library, UserId) of
-            [] ->
-                mnesia:write(#shurbej_library{
-                    library_id = UserId, library_type = user, version = 0
-                });
+        LibRef = {user, UserId},
+        case mnesia:read(shurbej_library, LibRef) of
+            [] -> mnesia:write(#shurbej_library{ref = LibRef, version = 0});
             _ -> ok
         end
     end),
@@ -162,74 +173,74 @@ delete_key(Key) ->
 %% Items
 %% ===================================================================
 
-get_item(LibId, ItemKey) ->
-    case db_read(shurbej_item, {LibId, ItemKey}) of
+get_item({LT, LI}, ItemKey) ->
+    case db_read(shurbej_item, {LT, LI, ItemKey}) of
         [#shurbej_item{deleted = false} = Item] -> {ok, Item};
         _ -> undefined
     end.
 
-list_items(LibId, Since) ->
+list_items({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_item{id = {L, _}, version = V, deleted = false} = Item)
-            when L =:= LibId, V > Since -> Item
+        fun(#shurbej_item{id = {T, I, _}, version = V, deleted = false} = Item)
+            when T =:= LT, I =:= LI, V > Since -> Item
         end),
     mnesia:dirty_select(shurbej_item, MS).
 
-list_item_versions(LibId, Since) ->
+list_item_versions({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_item{id = {L, K}, version = V, deleted = false})
-            when L =:= LibId, V > Since -> {K, V}
+        fun(#shurbej_item{id = {T, I, K}, version = V, deleted = false})
+            when T =:= LT, I =:= LI, V > Since -> {K, V}
         end),
     mnesia:dirty_select(shurbej_item, MS).
 
 write_item(Item) when is_record(Item, shurbej_item) ->
     db_write(Item).
 
-mark_item_deleted(LibId, ItemKey, Version) ->
-    case db_read(shurbej_item, {LibId, ItemKey}) of
+mark_item_deleted({LT, LI}, ItemKey, Version) ->
+    case db_read(shurbej_item, {LT, LI, ItemKey}) of
         [Item] ->
             db_write(Item#shurbej_item{version = Version, deleted = true});
         [] ->
             ok
     end.
 
-list_items_top(LibId, Since) ->
+list_items_top({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_item{id = {L, _}, version = V, deleted = false,
+        fun(#shurbej_item{id = {T, I, _}, version = V, deleted = false,
                           parent_key = undefined} = Item)
-            when L =:= LibId, V > Since -> Item
+            when T =:= LT, I =:= LI, V > Since -> Item
         end),
     mnesia:dirty_select(shurbej_item, MS).
 
-list_items_trash(LibId, Since) ->
+list_items_trash({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_item{id = {L, _}, version = V, deleted = true} = Item)
-            when L =:= LibId, V > Since -> Item
+        fun(#shurbej_item{id = {T, I, _}, version = V, deleted = true} = Item)
+            when T =:= LT, I =:= LI, V > Since -> Item
         end),
     mnesia:dirty_select(shurbej_item, MS).
 
-list_items_children(LibId, ParentKey, Since) ->
+list_items_children({LT, LI}, ParentKey, Since) ->
     %% Secondary index on parent_key: O(k) instead of full table scan.
     Candidates = mnesia:dirty_index_read(shurbej_item, ParentKey,
                                          #shurbej_item.parent_key),
-    [I || #shurbej_item{id = {L, _}, version = V, deleted = false} = I
-          <- Candidates, L =:= LibId, V > Since].
+    [I || #shurbej_item{id = {T, Id, _}, version = V, deleted = false} = I
+          <- Candidates, T =:= LT, Id =:= LI, V > Since].
 
-list_items_in_collection(LibId, CollKey, Since) ->
+list_items_in_collection({LT, LI} = LibRef, CollKey, Since) ->
     %% Bag table: O(1) key lookup returns all items in this collection.
-    Rows = mnesia:dirty_read(shurbej_item_collection, {LibId, CollKey}),
+    Rows = mnesia:dirty_read(shurbej_item_collection, {LT, LI, CollKey}),
     lists:filtermap(fun(#shurbej_item_collection{item_key = IK}) ->
-        case get_item(LibId, IK) of
+        case get_item(LibRef, IK) of
             {ok, #shurbej_item{version = V} = Item} when V > Since -> {true, Item};
             _ -> false
         end
     end, Rows).
 
-count_item_children(LibId) ->
+count_item_children({LT, LI}) ->
     %% Return only the parent_key field — no full data maps deserialized.
     MS = ets:fun2ms(
-        fun(#shurbej_item{id = {L, _}, deleted = false, parent_key = PK})
-            when L =:= LibId, PK =/= undefined -> PK
+        fun(#shurbej_item{id = {T, I, _}, deleted = false, parent_key = PK})
+            when T =:= LT, I =:= LI, PK =/= undefined -> PK
         end),
     ParentKeys = mnesia:dirty_select(shurbej_item, MS),
     lists:foldl(fun(PK, Acc) ->
@@ -240,39 +251,39 @@ count_item_children(LibId) ->
 %% Collections
 %% ===================================================================
 
-get_collection(LibId, CollKey) ->
-    case db_read(shurbej_collection, {LibId, CollKey}) of
+get_collection({LT, LI}, CollKey) ->
+    case db_read(shurbej_collection, {LT, LI, CollKey}) of
         [#shurbej_collection{deleted = false} = Coll] -> {ok, Coll};
         _ -> undefined
     end.
 
-list_collections(LibId, Since) ->
+list_collections({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_collection{id = {L, _}, version = V, deleted = false} = Coll)
-            when L =:= LibId, V > Since -> Coll
+        fun(#shurbej_collection{id = {T, I, _}, version = V, deleted = false} = Coll)
+            when T =:= LT, I =:= LI, V > Since -> Coll
         end),
     mnesia:dirty_select(shurbej_collection, MS).
 
-list_collection_versions(LibId, Since) ->
+list_collection_versions({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_collection{id = {L, K}, version = V, deleted = false})
-            when L =:= LibId, V > Since -> {K, V}
+        fun(#shurbej_collection{id = {T, I, K}, version = V, deleted = false})
+            when T =:= LT, I =:= LI, V > Since -> {K, V}
         end),
     mnesia:dirty_select(shurbej_collection, MS).
 
-list_collections_top(LibId, Since) ->
-    [C || #shurbej_collection{data = D} = C <- list_collections(LibId, Since),
+list_collections_top(LibRef, Since) ->
+    [C || #shurbej_collection{data = D} = C <- list_collections(LibRef, Since),
           maps:get(<<"parentCollection">>, D, false) =:= false].
 
-list_subcollections(LibId, ParentKey, Since) ->
-    [C || #shurbej_collection{data = D} = C <- list_collections(LibId, Since),
+list_subcollections(LibRef, ParentKey, Since) ->
+    [C || #shurbej_collection{data = D} = C <- list_collections(LibRef, Since),
           maps:get(<<"parentCollection">>, D, false) =:= ParentKey].
 
 write_collection(Coll) when is_record(Coll, shurbej_collection) ->
     db_write(Coll).
 
-mark_collection_deleted(LibId, CollKey, Version) ->
-    case db_read(shurbej_collection, {LibId, CollKey}) of
+mark_collection_deleted({LT, LI}, CollKey, Version) ->
+    case db_read(shurbej_collection, {LT, LI, CollKey}) of
         [Coll] ->
             db_write(Coll#shurbej_collection{version = Version, deleted = true});
         [] ->
@@ -283,31 +294,31 @@ mark_collection_deleted(LibId, CollKey, Version) ->
 %% Searches
 %% ===================================================================
 
-get_search(LibId, SearchKey) ->
-    case db_read(shurbej_search, {LibId, SearchKey}) of
+get_search({LT, LI}, SearchKey) ->
+    case db_read(shurbej_search, {LT, LI, SearchKey}) of
         [#shurbej_search{deleted = false} = S] -> {ok, S};
         _ -> undefined
     end.
 
-list_searches(LibId, Since) ->
+list_searches({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_search{id = {L, _}, version = V, deleted = false} = S)
-            when L =:= LibId, V > Since -> S
+        fun(#shurbej_search{id = {T, I, _}, version = V, deleted = false} = S)
+            when T =:= LT, I =:= LI, V > Since -> S
         end),
     mnesia:dirty_select(shurbej_search, MS).
 
-list_search_versions(LibId, Since) ->
+list_search_versions({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_search{id = {L, K}, version = V, deleted = false})
-            when L =:= LibId, V > Since -> {K, V}
+        fun(#shurbej_search{id = {T, I, K}, version = V, deleted = false})
+            when T =:= LT, I =:= LI, V > Since -> {K, V}
         end),
     mnesia:dirty_select(shurbej_search, MS).
 
 write_search(Search) when is_record(Search, shurbej_search) ->
     db_write(Search).
 
-mark_search_deleted(LibId, SearchKey, Version) ->
-    case db_read(shurbej_search, {LibId, SearchKey}) of
+mark_search_deleted({LT, LI}, SearchKey, Version) ->
+    case db_read(shurbej_search, {LT, LI, SearchKey}) of
         [Search] ->
             db_write(Search#shurbej_search{version = Version, deleted = true});
         [] ->
@@ -318,135 +329,135 @@ mark_search_deleted(LibId, SearchKey, Version) ->
 %% Tags
 %% ===================================================================
 
-list_tags(LibId, Since) ->
+list_tags({LT, LI} = LibRef, Since) ->
     case Since of
         0 ->
-            %% Full sync: single scan of the tag table by LibId.
+            %% Full sync: single scan of the tag table by LibRef.
             MS = ets:fun2ms(
-                fun(#shurbej_tag{id = {L, Tag, _}, tag_type = Type})
-                    when L =:= LibId -> {Tag, Type}
+                fun(#shurbej_tag{id = {T, I, Tag, _}, tag_type = Type})
+                    when T =:= LT, I =:= LI -> {Tag, Type}
                 end),
             lists:usort(mnesia:dirty_select(shurbej_tag, MS));
         _ ->
             %% Incremental: build key set from changed items, single tag scan.
             ItemKeySet = sets:from_list(
-                [K || {K, _V} <- list_item_versions(LibId, Since)]),
+                [K || {K, _V} <- list_item_versions(LibRef, Since)]),
             MS = ets:fun2ms(
-                fun(#shurbej_tag{id = {L, Tag, IK}, tag_type = Type})
-                    when L =:= LibId -> {Tag, Type, IK}
+                fun(#shurbej_tag{id = {T, I, Tag, IK}, tag_type = Type})
+                    when T =:= LT, I =:= LI -> {Tag, Type, IK}
                 end),
             AllTags = mnesia:dirty_select(shurbej_tag, MS),
             lists:usort([{Tag, Type} || {Tag, Type, IK} <- AllTags,
                                         sets:is_element(IK, ItemKeySet)])
     end.
 
-set_item_tags(LibId, ItemKey, Tags) ->
-    delete_item_tags(LibId, ItemKey),
+set_item_tags({LT, LI} = LibRef, ItemKey, Tags) ->
+    delete_item_tags(LibRef, ItemKey),
     lists:foreach(fun({Tag, Type}) ->
-        db_write(#shurbej_tag{id = {LibId, Tag, ItemKey}, tag_type = Type})
+        db_write(#shurbej_tag{id = {LT, LI, Tag, ItemKey}, tag_type = Type})
     end, Tags).
 
-delete_item_tags(LibId, ItemKey) ->
+delete_item_tags({LT, LI}, ItemKey) ->
     MS = ets:fun2ms(
-        fun(#shurbej_tag{id = {L, _, I}} = T)
-            when L =:= LibId, I =:= ItemKey -> T
+        fun(#shurbej_tag{id = {T, I, _, IK}} = Tag)
+            when T =:= LT, I =:= LI, IK =:= ItemKey -> Tag
         end),
     Existing = mnesia:dirty_select(shurbej_tag, MS),
     lists:foreach(fun(T) -> db_delete_object(T) end, Existing).
 
-list_item_tags(LibId, ItemKey) ->
+list_item_tags({LT, LI}, ItemKey) ->
     MS = ets:fun2ms(
-        fun(#shurbej_tag{id = {L, Tag, IK}, tag_type = Type})
-            when L =:= LibId, IK =:= ItemKey -> {Tag, Type}
+        fun(#shurbej_tag{id = {T, I, Tag, IK}, tag_type = Type})
+            when T =:= LT, I =:= LI, IK =:= ItemKey -> {Tag, Type}
         end),
     mnesia:dirty_select(shurbej_tag, MS).
 
-delete_tags_by_name(LibId, TagNames) ->
+delete_tags_by_name({LT, LI}, TagNames) ->
     TagSet = sets:from_list(TagNames),
     MS = ets:fun2ms(
-        fun(#shurbej_tag{id = {L, Tag, _}} = T)
-            when L =:= LibId -> {T, Tag}
+        fun(#shurbej_tag{id = {T, I, Tag, _}} = Row)
+            when T =:= LT, I =:= LI -> {Row, Tag}
         end),
     AllTags = mnesia:dirty_select(shurbej_tag, MS),
-    Deleted = [begin db_delete_object(T), Tag end
-               || {T, Tag} <- AllTags, sets:is_element(Tag, TagSet)],
+    Deleted = [begin db_delete_object(Row), Tag end
+               || {Row, Tag} <- AllTags, sets:is_element(Tag, TagSet)],
     lists:usort(Deleted).
 
 %% ===================================================================
 %% Settings
 %% ===================================================================
 
-get_setting(LibId, SettingKey) ->
-    case db_read(shurbej_setting, {LibId, SettingKey}) of
+get_setting({LT, LI}, SettingKey) ->
+    case db_read(shurbej_setting, {LT, LI, SettingKey}) of
         [Setting] -> {ok, Setting};
         [] -> undefined
     end.
 
-list_settings(LibId, Since) ->
+list_settings({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_setting{id = {L, _}, version = V} = S)
-            when L =:= LibId, V > Since -> S
+        fun(#shurbej_setting{id = {T, I, _}, version = V} = S)
+            when T =:= LT, I =:= LI, V > Since -> S
         end),
     mnesia:dirty_select(shurbej_setting, MS).
 
-list_setting_versions(LibId, Since) ->
+list_setting_versions({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_setting{id = {L, K}, version = V})
-            when L =:= LibId, V > Since -> {K, V}
+        fun(#shurbej_setting{id = {T, I, K}, version = V})
+            when T =:= LT, I =:= LI, V > Since -> {K, V}
         end),
     mnesia:dirty_select(shurbej_setting, MS).
 
 write_setting(Setting) when is_record(Setting, shurbej_setting) ->
     db_write(Setting).
 
-delete_setting(LibId, SettingKey) ->
-    db_delete({shurbej_setting, {LibId, SettingKey}}).
+delete_setting({LT, LI}, SettingKey) ->
+    db_delete({shurbej_setting, {LT, LI, SettingKey}}).
 
 %% ===================================================================
 %% Deleted tracking
 %% ===================================================================
 
-list_deleted(LibId, ObjectType, Since) ->
+list_deleted({LT, LI}, ObjectType, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_deleted{id = {L, OT, Key}, version = V})
-            when L =:= LibId, OT =:= ObjectType, V > Since -> Key
+        fun(#shurbej_deleted{id = {T, I, OT, Key}, version = V})
+            when T =:= LT, I =:= LI, OT =:= ObjectType, V > Since -> Key
         end),
     mnesia:dirty_select(shurbej_deleted, MS).
 
-record_deletion(LibId, ObjectType, ObjectKey, Version) ->
+record_deletion({LT, LI}, ObjectType, ObjectKey, Version) ->
     db_write(#shurbej_deleted{
-        id = {LibId, ObjectType, ObjectKey}, version = Version
+        id = {LT, LI, ObjectType, ObjectKey}, version = Version
     }).
 
 %% ===================================================================
 %% Full-text
 %% ===================================================================
 
-get_fulltext(LibId, ItemKey) ->
-    case db_read(shurbej_fulltext, {LibId, ItemKey}) of
+get_fulltext({LT, LI}, ItemKey) ->
+    case db_read(shurbej_fulltext, {LT, LI, ItemKey}) of
         [Ft] -> {ok, Ft};
         [] -> undefined
     end.
 
-list_fulltext_versions(LibId, Since) ->
+list_fulltext_versions({LT, LI}, Since) ->
     MS = ets:fun2ms(
-        fun(#shurbej_fulltext{id = {L, K}, version = V})
-            when L =:= LibId, V > Since -> {K, V}
+        fun(#shurbej_fulltext{id = {T, I, K}, version = V})
+            when T =:= LT, I =:= LI, V > Since -> {K, V}
         end),
     mnesia:dirty_select(shurbej_fulltext, MS).
 
 write_fulltext(Ft) when is_record(Ft, shurbej_fulltext) ->
     db_write(Ft).
 
-delete_fulltext(LibId, ItemKey) ->
-    db_delete({shurbej_fulltext, {LibId, ItemKey}}).
+delete_fulltext({LT, LI}, ItemKey) ->
+    db_delete({shurbej_fulltext, {LT, LI, ItemKey}}).
 
 %% ===================================================================
 %% File metadata
 %% ===================================================================
 
-get_file_meta(LibId, ItemKey) ->
-    case db_read(shurbej_file_meta, {LibId, ItemKey}) of
+get_file_meta({LT, LI}, ItemKey) ->
+    case db_read(shurbej_file_meta, {LT, LI, ItemKey}) of
         [Meta] -> {ok, Meta};
         [] -> undefined
     end.
@@ -454,15 +465,15 @@ get_file_meta(LibId, ItemKey) ->
 write_file_meta(Meta) when is_record(Meta, shurbej_file_meta) ->
     db_write(Meta).
 
-delete_file_meta(LibId, ItemKey) ->
+delete_file_meta({LT, LI}, ItemKey) ->
     %% Unref the blob before removing metadata
-    case db_read(shurbej_file_meta, {LibId, ItemKey}) of
+    case db_read(shurbej_file_meta, {LT, LI, ItemKey}) of
         [#shurbej_file_meta{sha256 = Hash}] ->
             case blob_unref(Hash) of
                 {ok, 0} -> file:delete(shurbej_files:blob_path(Hash));
                 _ -> ok
             end,
-            db_delete({shurbej_file_meta, {LibId, ItemKey}});
+            db_delete({shurbej_file_meta, {LT, LI, ItemKey}});
         [] ->
             ok
     end.
@@ -507,19 +518,74 @@ blob_unref(Hash) ->
 %% Collection index
 %% ===================================================================
 
-set_item_collections(LibId, ItemKey, CollKeys) ->
-    delete_item_collections(LibId, ItemKey),
+set_item_collections({LT, LI} = LibRef, ItemKey, CollKeys) ->
+    delete_item_collections(LibRef, ItemKey),
     lists:foreach(fun(CollKey) ->
-        db_write(#shurbej_item_collection{id = {LibId, CollKey}, item_key = ItemKey})
+        db_write(#shurbej_item_collection{id = {LT, LI, CollKey}, item_key = ItemKey})
     end, CollKeys).
 
-delete_item_collections(LibId, ItemKey) ->
+delete_item_collections({LT, LI}, ItemKey) ->
     MS = ets:fun2ms(
-        fun(#shurbej_item_collection{id = {L, _}, item_key = IK} = R)
-            when L =:= LibId, IK =:= ItemKey -> R
+        fun(#shurbej_item_collection{id = {T, I, _}, item_key = IK} = R)
+            when T =:= LT, I =:= LI, IK =:= ItemKey -> R
         end),
     Existing = mnesia:dirty_select(shurbej_item_collection, MS),
     lists:foreach(fun(R) -> db_delete_object(R) end, Existing).
+
+%% ===================================================================
+%% Groups
+%% ===================================================================
+
+get_group(GroupId) ->
+    case db_read(shurbej_group, GroupId) of
+        [Group] -> {ok, Group};
+        [] -> undefined
+    end.
+
+list_groups() ->
+    mnesia:dirty_select(shurbej_group,
+        ets:fun2ms(fun(#shurbej_group{} = G) -> G end)).
+
+write_group(Group) when is_record(Group, shurbej_group) ->
+    db_write(Group).
+
+delete_group(GroupId) ->
+    %% Wipe group library data + membership; the caller is admin so we don't
+    %% gate on permissions here.
+    LibRef = {group, GroupId},
+    {atomic, ok} = mnesia:transaction(fun() ->
+        %% Remove group and all memberships
+        mnesia:delete({shurbej_group, GroupId}),
+        MemberMS = ets:fun2ms(
+            fun(#shurbej_group_member{id = {G, _}} = M) when G =:= GroupId -> M end),
+        [mnesia:delete_object(M) || M <- mnesia:select(shurbej_group_member, MemberMS)],
+        %% Remove all data associated with this group library
+        mnesia:delete({shurbej_library, LibRef}),
+        ok
+    end),
+    ok.
+
+add_group_member(GroupId, UserId, Role) ->
+    db_write(#shurbej_group_member{id = {GroupId, UserId}, role = Role}).
+
+remove_group_member(GroupId, UserId) ->
+    db_delete({shurbej_group_member, {GroupId, UserId}}).
+
+get_group_member(GroupId, UserId) ->
+    case db_read(shurbej_group_member, {GroupId, UserId}) of
+        [Member] -> {ok, Member};
+        [] -> undefined
+    end.
+
+list_group_members(GroupId) ->
+    MS = ets:fun2ms(
+        fun(#shurbej_group_member{id = {G, _}} = M) when G =:= GroupId -> M end),
+    mnesia:dirty_select(shurbej_group_member, MS).
+
+list_user_groups(UserId) ->
+    MS = ets:fun2ms(
+        fun(#shurbej_group_member{id = {_, U}} = M) when U =:= UserId -> M end),
+    mnesia:dirty_select(shurbej_group_member, MS).
 
 %% ===================================================================
 %% Internal

@@ -7,7 +7,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -32,13 +32,13 @@ needs_write(_) -> false.
 
 %% GET single item
 handle(<<"GET">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
-    case shurbej_db:get_item(LibId, ItemKey) of
+    case shurbej_db:get_item(LibRef, ItemKey) of
         {ok, Item} ->
-            {ok, LibVersion} = shurbej_version:get(LibId),
-            ChildrenCounts = cached_children_counts(LibId, LibVersion),
-            Body = shurbej_http_common:envelope_item(LibId, Item, ChildrenCounts),
+            {ok, LibVersion} = shurbej_version:get(LibRef),
+            ChildrenCounts = cached_children_counts(LibRef, LibVersion),
+            Body = shurbej_http_common:envelope_item(LibRef, Item, ChildrenCounts),
             Req = shurbej_http_common:json_response(200, Body, Item#shurbej_item.version, Req0),
             {ok, Req, State};
         undefined ->
@@ -48,17 +48,17 @@ handle(<<"GET">>, Req0, #{scope := single} = State) ->
 
 %% GET list — dispatch by scope
 handle(<<"GET">>, Req0, #{scope := Scope} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     Since = shurbej_http_common:get_since(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:check_304(Req0, LibVersion) of
         {304, Req} ->
             {ok, Req, State};
         continue ->
-            Items = fetch_items(Scope, LibId, Since, Req0),
+            Items = fetch_items(Scope, LibRef, Since, Req0),
             Items2 = apply_filters(Items, Req0),
             Format = shurbej_http_common:get_format(Req0),
-            respond_list(Format, Items2, LibId, LibVersion, Req0, State)
+            respond_list(Format, Items2, LibRef, LibVersion, Req0, State)
     end;
 
 %% POST — create/update items (with write token idempotency)
@@ -77,7 +77,7 @@ handle(<<"POST">>, Req0, State) ->
 
 %% PUT/PATCH single item — update a specific item
 handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Method =:= <<"PATCH">> ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
@@ -85,7 +85,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
             Req = shurbej_http_common:error_response(400, body_error(Reason), Req1),
             {ok, Req, State};
         {ok, Incoming, Req1} ->
-            case shurbej_db:get_item(LibId, ItemKey) of
+            case shurbej_db:get_item(LibRef, ItemKey) of
                 undefined ->
                     Req = shurbej_http_common:error_response(404, <<"Item not found">>, Req1),
                     {ok, Req, State};
@@ -100,11 +100,11 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
                             Req = shurbej_http_common:error_response(400, Reason2, Req1),
                             {ok, Req, State};
                         ok ->
-                            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
-                                write_item(LibId, Item, NewVersion)
+                            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
+                                write_item(LibRef, Item, NewVersion)
                             end) of
                                 {ok, NewVersion} ->
-                                    Envelope = envelope_for_write(LibId, Item, NewVersion),
+                                    Envelope = envelope_for_write(LibRef, Item, NewVersion),
                                     Req = shurbej_http_common:json_response(200, Envelope, NewVersion, Req1),
                                     {ok, Req, State};
                                 {error, precondition, CurrentVersion} ->
@@ -119,11 +119,11 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
 
 %% DELETE single item
 handle(<<"DELETE">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
-    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
-        cascade_delete(LibId, ItemKey, NewVersion),
+    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
+        cascade_delete(LibRef, ItemKey, NewVersion),
         ok
     end) of
         {ok, NewVersion} ->
@@ -140,7 +140,7 @@ handle(<<"DELETE">>, Req0, #{scope := single} = State) ->
 
 %% DELETE multiple — cascade to tags, fulltext, file metadata, children
 handle(<<"DELETE">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     #{itemKey := KeysParam} = cowboy_req:match_qs([{itemKey, [], <<>>}], Req0),
     Keys = [K || K <- binary:split(KeysParam, <<",">>, [global]), K =/= <<>>],
@@ -149,9 +149,9 @@ handle(<<"DELETE">>, Req0, State) ->
             Req = shurbej_http_common:error_response(400, <<"No item keys specified">>, Req0),
             {ok, Req, State};
         _ ->
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                 lists:foreach(fun(K) ->
-                    cascade_delete(LibId, K, NewVersion)
+                    cascade_delete(LibRef, K, NewVersion)
                 end, Keys),
                 ok
             end) of
@@ -174,55 +174,55 @@ handle(_, Req0, State) ->
 
 %% Internal — respond to list GET by format
 
-respond_list(<<"versions">>, Items, _LibId, LibVersion, Req0, State) ->
+respond_list(<<"versions">>, Items, _LibRef, LibVersion, Req0, State) ->
     VersionMap = maps:from_list(
-        [{K, V} || #shurbej_item{id = {_, K}, version = V} <- Items]),
+        [{K, V} || #shurbej_item{id = {_, _, K}, version = V} <- Items]),
     Req = shurbej_http_common:json_response(200, VersionMap, LibVersion, Req0),
     {ok, Req, State};
-respond_list(<<"keys">>, Items, _LibId, LibVersion, Req0, State) ->
-    Keys = [K || #shurbej_item{id = {_, K}} <- Items],
+respond_list(<<"keys">>, Items, _LibRef, LibVersion, Req0, State) ->
+    Keys = [K || #shurbej_item{id = {_, _, K}} <- Items],
     Req = shurbej_http_common:json_response(200, Keys, LibVersion, Req0),
     {ok, Req, State};
-respond_list(Format, _Items, _LibId, _LibVersion, Req0, State)
+respond_list(Format, _Items, _LibRef, _LibVersion, Req0, State)
         when Format =:= <<"atom">>; Format =:= <<"bib">>;
              Format =:= <<"ris">>; Format =:= <<"mods">> ->
     Req = shurbej_http_common:error_response(400,
         <<"Export format '", Format/binary, "' is not supported by this server">>, Req0),
     {ok, Req, State};
-respond_list(_, Items, LibId, LibVersion, Req0, State) ->
-    ChildrenCounts = cached_children_counts(LibId, LibVersion),
+respond_list(_, Items, LibRef, LibVersion, Req0, State) ->
+    ChildrenCounts = cached_children_counts(LibRef, LibVersion),
     Sorted = shurbej_http_common:sort_records(Items,
         shurbej_http_common:get_sort(Req0),
         shurbej_http_common:get_direction(Req0)),
     Req = shurbej_http_common:list_response(Req0, Sorted, LibVersion,
-        fun(I) -> shurbej_http_common:envelope_item(LibId, I, ChildrenCounts) end),
+        fun(I) -> shurbej_http_common:envelope_item(LibRef, I, ChildrenCounts) end),
     {ok, Req, State}.
 
 %% Internal — fetch items by scope
 
-fetch_items(all, LibId, Since, Req) ->
-    Base = shurbej_db:list_items(LibId, Since),
-    maybe_include_trashed(Base, LibId, Since, Req);
-fetch_items(top, LibId, Since, Req) ->
-    Base = shurbej_db:list_items_top(LibId, Since),
-    maybe_include_trashed(Base, LibId, Since, Req);
-fetch_items(trash, LibId, Since, _Req) ->
-    shurbej_db:list_items_trash(LibId, Since);
-fetch_items(children, LibId, Since, Req) ->
+fetch_items(all, LibRef, Since, Req) ->
+    Base = shurbej_db:list_items(LibRef, Since),
+    maybe_include_trashed(Base, LibRef, Since, Req);
+fetch_items(top, LibRef, Since, Req) ->
+    Base = shurbej_db:list_items_top(LibRef, Since),
+    maybe_include_trashed(Base, LibRef, Since, Req);
+fetch_items(trash, LibRef, Since, _Req) ->
+    shurbej_db:list_items_trash(LibRef, Since);
+fetch_items(children, LibRef, Since, Req) ->
     ParentKey = cowboy_req:binding(item_key, Req),
-    shurbej_db:list_items_children(LibId, ParentKey, Since);
-fetch_items(collection, LibId, Since, Req) ->
+    shurbej_db:list_items_children(LibRef, ParentKey, Since);
+fetch_items(collection, LibRef, Since, Req) ->
     CollKey = cowboy_req:binding(coll_key, Req),
-    shurbej_db:list_items_in_collection(LibId, CollKey, Since);
-fetch_items(collection_top, LibId, Since, Req) ->
+    shurbej_db:list_items_in_collection(LibRef, CollKey, Since);
+fetch_items(collection_top, LibRef, Since, Req) ->
     CollKey = cowboy_req:binding(coll_key, Req),
     [I || #shurbej_item{data = D} = I
-          <- shurbej_db:list_items_in_collection(LibId, CollKey, Since),
+          <- shurbej_db:list_items_in_collection(LibRef, CollKey, Since),
           maps:get(<<"parentItem">>, D, false) =:= false].
 
-maybe_include_trashed(Items, LibId, Since, Req) ->
+maybe_include_trashed(Items, LibRef, Since, Req) ->
     case shurbej_http_common:get_include_trashed(Req) of
-        true -> Items ++ shurbej_db:list_items_trash(LibId, Since);
+        true -> Items ++ shurbej_db:list_items_trash(LibRef, Since);
         false -> Items
     end.
 
@@ -236,10 +236,10 @@ apply_filters(Items, Req) ->
 filter_by_item_keys(Items, all) -> Items;
 filter_by_item_keys(Items, Keys) ->
     KeySet = sets:from_list(Keys),
-    [I || #shurbej_item{id = {_, K}} = I <- Items, sets:is_element(K, KeySet)].
+    [I || #shurbej_item{id = {_, _, K}} = I <- Items, sets:is_element(K, KeySet)].
 
 do_post(Req0, State, WriteToken) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
         {error, Reason, Req1} ->
@@ -254,15 +254,15 @@ do_post(Req0, State, WriteToken) ->
                     Req = shurbej_http_common:json_response(400, Result, Req1),
                     {ok, Req, State};
                 _ ->
-                    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+                    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                         lists:foreach(fun({_Idx, Item}) ->
-                            write_item(LibId, Item, NewVersion)
+                            write_item(LibRef, Item, NewVersion)
                         end, Valid),
                         ok
                     end) of
                         {ok, NewVersion} ->
                             Successful = maps:from_list(
-                                [{integer_to_binary(Idx), envelope_for_write(LibId, Item, NewVersion)}
+                                [{integer_to_binary(Idx), envelope_for_write(LibRef, Item, NewVersion)}
                                  || {Idx, Item} <- Valid]),
                             Result = #{
                                 <<"successful">> => Successful,
@@ -289,17 +289,17 @@ do_post(Req0, State, WriteToken) ->
     end.
 
 %% Cascade delete — wrapped in Mnesia transaction for atomicity
-cascade_delete(LibId, ItemKey, NewVersion) ->
-    shurbej_db:mark_item_deleted(LibId, ItemKey, NewVersion),
-    shurbej_db:record_deletion(LibId, <<"item">>, ItemKey, NewVersion),
-    shurbej_db:delete_item_tags(LibId, ItemKey),
-    shurbej_db:delete_item_collections(LibId, ItemKey),
-    shurbej_db:delete_fulltext(LibId, ItemKey),
-    shurbej_db:delete_file_meta(LibId, ItemKey),
+cascade_delete(LibRef, ItemKey, NewVersion) ->
+    shurbej_db:mark_item_deleted(LibRef, ItemKey, NewVersion),
+    shurbej_db:record_deletion(LibRef, <<"item">>, ItemKey, NewVersion),
+    shurbej_db:delete_item_tags(LibRef, ItemKey),
+    shurbej_db:delete_item_collections(LibRef, ItemKey),
+    shurbej_db:delete_fulltext(LibRef, ItemKey),
+    shurbej_db:delete_file_meta(LibRef, ItemKey),
     %% list_items_children now uses the parent_key secondary index — O(k) not O(n).
-    Children = shurbej_db:list_items_children(LibId, ItemKey, 0),
-    lists:foreach(fun(#shurbej_item{id = {_, ChildKey}}) ->
-        cascade_delete(LibId, ChildKey, NewVersion)
+    Children = shurbej_db:list_items_children(LibRef, ItemKey, 0),
+    lists:foreach(fun(#shurbej_item{id = {_, _, ChildKey}}) ->
+        cascade_delete(LibRef, ChildKey, NewVersion)
     end, Children).
 
 ensure_key(Item) when is_map(Item) ->
@@ -309,7 +309,7 @@ ensure_key(Item) when is_map(Item) ->
     end;
 ensure_key(_) -> #{<<"key">> => generate_key()}.
 
-write_item(LibId, Item, NewVersion) ->
+write_item({LT, LI} = LibRef, Item, NewVersion) ->
     Key = maps:get(<<"key">>, Item),
     FullData = Item#{<<"version">> => NewVersion},
     ParentKey = case maps:get(<<"parentItem">>, Item, false) of
@@ -317,17 +317,17 @@ write_item(LibId, Item, NewVersion) ->
         _ -> undefined
     end,
     shurbej_db:write_item(#shurbej_item{
-        id = {LibId, Key},
+        id = {LT, LI, Key},
         version = NewVersion,
         data = FullData,
         deleted = false,
         parent_key = ParentKey
     }),
     Collections = maps:get(<<"collections">>, Item, []),
-    shurbej_db:set_item_collections(LibId, Key, Collections),
+    shurbej_db:set_item_collections(LibRef, Key, Collections),
     Tags = maps:get(<<"tags">>, Item, []),
     TagPairs = [{maps:get(<<"tag">>, T, <<>>), maps:get(<<"type">>, T, 0)} || T <- Tags],
-    shurbej_db:set_item_tags(LibId, Key, TagPairs).
+    shurbej_db:set_item_tags(LibRef, Key, TagPairs).
 
 validate_each(Items, ValidateFn) ->
     {Valid, Failed} = lists:foldl(fun({Idx, Item}, {V, F}) ->
@@ -344,18 +344,18 @@ validate_each(Items, ValidateFn) ->
     end, {[], #{}}, lists:enumerate(0, Items)),
     {lists:reverse(Valid), Failed}.
 
-envelope_for_write(LibId, Item, NewVersion) ->
+envelope_for_write(LibRef, Item, NewVersion) ->
     Key = maps:get(<<"key">>, Item),
     Base = shurbej_http_common:base_url(),
-    LibBin = integer_to_binary(LibId),
+    Prefix = shurbej_http_common:lib_path_prefix(LibRef),
     FullData = Item#{<<"key">> => Key, <<"version">> => NewVersion},
     #{
         <<"key">> => Key,
         <<"version">> => NewVersion,
-        <<"library">> => #{<<"type">> => <<"user">>, <<"id">> => LibId},
+        <<"library">> => shurbej_http_common:library_obj(LibRef),
         <<"links">> => #{
             <<"self">> => #{
-                <<"href">> => <<Base/binary, "/users/", LibBin/binary, "/items/", Key/binary>>,
+                <<"href">> => <<Base/binary, Prefix/binary, "/items/", Key/binary>>,
                 <<"type">> => <<"application/json">>
             }
         },
@@ -373,13 +373,13 @@ generate_key() ->
 body_error(invalid_json) -> <<"Invalid JSON">>;
 body_error(body_too_large) -> <<"Request body too large">>.
 
-%% Cache children counts by {LibId, LibVersion} — computed at most once per write.
-cached_children_counts(LibId, LibVersion) ->
-    Key = {shurbej_children, LibId, LibVersion},
+%% Cache children counts by {LibRef, LibVersion} — computed at most once per write.
+cached_children_counts(LibRef, LibVersion) ->
+    Key = {shurbej_children, LibRef, LibVersion},
     case persistent_term:get(Key, undefined) of
         undefined ->
-            Counts = shurbej_db:count_item_children(LibId),
-            catch persistent_term:erase({shurbej_children, LibId, LibVersion - 1}),
+            Counts = shurbej_db:count_item_children(LibRef),
+            catch persistent_term:erase({shurbej_children, LibRef, LibVersion - 1}),
             persistent_term:put(Key, Counts),
             Counts;
         Counts ->

@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -26,9 +26,9 @@ needs_write(<<"DELETE">>) -> true;
 needs_write(_) -> false.
 
 handle(<<"GET">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     Since = shurbej_http_common:get_since(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:get_if_modified(Req0) of
         V when is_integer(V), V >= LibVersion ->
             Req = cowboy_req:reply(304, #{
@@ -36,29 +36,29 @@ handle(<<"GET">>, Req0, State) ->
             }, Req0),
             {ok, Req, State};
         _ ->
-            Searches0 = shurbej_db:list_searches(LibId, Since),
+            Searches0 = shurbej_db:list_searches(LibRef, Since),
             Searches = shurbej_http_common:filter_by_keys(Searches0,
                 shurbej_http_common:get_search_keys(Req0)),
             Format = shurbej_http_common:get_format(Req0),
             case Format of
                 <<"versions">> ->
-                    Pairs = shurbej_db:list_search_versions(LibId, Since),
+                    Pairs = shurbej_db:list_search_versions(LibRef, Since),
                     Req = shurbej_http_common:json_response(200, maps:from_list(Pairs), LibVersion, Req0),
                     {ok, Req, State};
                 <<"keys">> ->
-                    Keys = [K || #shurbej_search{id = {_, K}} <- Searches],
+                    Keys = [K || #shurbej_search{id = {_, _, K}} <- Searches],
                     Req = shurbej_http_common:json_response(200, Keys, LibVersion, Req0),
                     {ok, Req, State};
                 _ ->
                     Req = shurbej_http_common:list_response(Req0, Searches, LibVersion,
-                        fun(S) -> shurbej_http_common:envelope_search(LibId, S) end),
+                        fun(S) -> shurbej_http_common:envelope_search(LibRef, S) end),
                     {ok, Req, State}
             end
     end;
 
 %% PUT/PATCH single search
 handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Method =:= <<"PATCH">> ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     SearchKey = cowboy_req:binding(search_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
@@ -66,7 +66,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
             Req = shurbej_http_common:error_response(400, <<"Invalid JSON">>, Req1),
             {ok, Req, State};
         {ok, Incoming, Req1} ->
-    case shurbej_db:get_search(LibId, SearchKey) of
+    case shurbej_db:get_search(LibRef, SearchKey) of
         undefined ->
             Req = shurbej_http_common:error_response(404, <<"Search not found">>, Req1),
             {ok, Req, State};
@@ -81,18 +81,20 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
                     Req = shurbej_http_common:error_response(400, Reason, Req1),
                     {ok, Req, State};
                 ok ->
-                    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+                    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                         FullData = Search#{<<"version">> => NewVersion},
                         shurbej_db:write_search(#shurbej_search{
-                            id = {LibId, SearchKey}, version = NewVersion,
+                            id = {LT, LI, SearchKey}, version = NewVersion,
                             data = FullData, deleted = false
                         })
                     end) of
                         {ok, NewVersion} ->
                             FullData = Search#{<<"version">> => NewVersion, <<"key">> => SearchKey},
-                            Envelope = #{<<"key">> => SearchKey, <<"version">> => NewVersion,
-                                         <<"library">> => #{<<"type">> => <<"user">>, <<"id">> => LibId},
-                                         <<"data">> => FullData},
+                            Updated = #shurbej_search{
+                                id = {LT, LI, SearchKey}, version = NewVersion,
+                                data = FullData, deleted = false
+                            },
+                            Envelope = shurbej_http_common:envelope_search(LibRef, Updated),
                             Req = shurbej_http_common:json_response(200, Envelope, NewVersion, Req1),
                             {ok, Req, State};
                         {error, precondition, CurrentVersion} ->
@@ -106,7 +108,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
     end;
 
 handle(<<"POST">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
         {error, _, Req1} ->
@@ -121,12 +123,12 @@ handle(<<"POST">>, Req0, State) ->
             Req = shurbej_http_common:json_response(400, Result, Req1),
             {ok, Req, State};
         _ ->
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                 lists:foreach(fun({_Idx, S}) ->
                     Key = maps:get(<<"key">>, S),
                     FullData = S#{<<"key">> => Key, <<"version">> => NewVersion},
                     shurbej_db:write_search(#shurbej_search{
-                        id = {LibId, Key},
+                        id = {LT, LI, Key},
                         version = NewVersion,
                         data = FullData,
                         deleted = false
@@ -136,7 +138,7 @@ handle(<<"POST">>, Req0, State) ->
             end) of
                 {ok, NewVersion} ->
                     Successful = maps:from_list(
-                        [{integer_to_binary(Idx), shurbej_http_items:envelope_for_write(LibId, S, NewVersion)}
+                        [{integer_to_binary(Idx), shurbej_http_items:envelope_for_write(LibRef, S, NewVersion)}
                          || {Idx, S} <- Valid]),
                     Result = #{
                         <<"successful">> => Successful,
@@ -158,14 +160,14 @@ handle(<<"POST">>, Req0, State) ->
     end;
 
 handle(<<"DELETE">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     #{searchKey := KeysParam} = cowboy_req:match_qs([{searchKey, [], <<>>}], Req0),
     Keys = binary:split(KeysParam, <<",">>, [global]),
-    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
         lists:foreach(fun(K) ->
-            shurbej_db:mark_search_deleted(LibId, K, NewVersion),
-            shurbej_db:record_deletion(LibId, <<"search">>, K, NewVersion)
+            shurbej_db:mark_search_deleted(LibRef, K, NewVersion),
+            shurbej_db:record_deletion(LibRef, <<"search">>, K, NewVersion)
         end, Keys),
         ok
     end) of

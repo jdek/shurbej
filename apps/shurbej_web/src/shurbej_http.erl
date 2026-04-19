@@ -2,6 +2,8 @@
 -export([routes/0]).
 
 routes() ->
+    UserRoutes = library_routes("/users/:user_id"),
+    GroupRoutes = library_routes("/groups/:group_id"),
     [
         %% Auth — session-based login flow
         {"/keys", shurbej_http_keys, #{action => create_key}},
@@ -32,48 +34,13 @@ routes() ->
         {"/itemTypeCreatorTypes", shurbej_http_meta, #{action => item_type_creator_types}},
         {"/creatorFields", shurbej_http_meta, #{action => creator_fields}},
 
-        %% Items
-        {"/users/:user_id/items", shurbej_http_items, #{scope => all}},
-        {"/users/:user_id/items/top", shurbej_http_items, #{scope => top}},
-        {"/users/:user_id/items/trash", shurbej_http_items, #{scope => trash}},
-        {"/users/:user_id/items/:item_key", shurbej_http_items, #{scope => single}},
-        {"/users/:user_id/items/:item_key/children", shurbej_http_items, #{scope => children}},
-        {"/users/:user_id/items/:item_key/tags", shurbej_http_tags, #{scope => item_tags}},
-
-        %% Collections
-        {"/users/:user_id/collections", shurbej_http_collections, #{scope => all}},
-        {"/users/:user_id/collections/top", shurbej_http_collections, #{scope => top}},
-        {"/users/:user_id/collections/:coll_key", shurbej_http_collections, #{scope => single}},
-        {"/users/:user_id/collections/:coll_key/collections", shurbej_http_collections, #{scope => subcollections}},
-        {"/users/:user_id/collections/:coll_key/items", shurbej_http_items, #{scope => collection}},
-        {"/users/:user_id/collections/:coll_key/items/top", shurbej_http_items, #{scope => collection_top}},
-
-        %% Searches
-        {"/users/:user_id/searches", shurbej_http_searches, #{scope => all}},
-        {"/users/:user_id/searches/:search_key", shurbej_http_searches, #{scope => single}},
-
-        %% Tags
-        {"/users/:user_id/tags", shurbej_http_tags, #{scope => all}},
-
-        %% Settings
-        {"/users/:user_id/settings", shurbej_http_settings, #{scope => all}},
-        {"/users/:user_id/settings/:setting_key", shurbej_http_settings, #{scope => single}},
-
-        %% Deleted
-        {"/users/:user_id/deleted", shurbej_http_deleted, #{}},
-
-        %% Full-text
-        {"/users/:user_id/fulltext", shurbej_http_fulltext, #{scope => versions}},
-        {"/users/:user_id/items/:item_key/fulltext", shurbej_http_fulltext, #{scope => single}},
-
-        %% Files
-        {"/users/:user_id/items/:item_key/file", shurbej_http_files, #{}},
-        {"/users/:user_id/items/:item_key/file/view", shurbej_http_files, #{action => view}},
-        {"/users/:user_id/items/:item_key/file/view/url", shurbej_http_files, #{action => view_url}},
-
-        %% Groups
+        %% Group listing (per-user) + group metadata
         {"/users/:user_id/groups", shurbej_http_groups, #{}},
-
+        {"/groups/:group_id", shurbej_http_group, #{}}
+    ]
+    ++ UserRoutes
+    ++ GroupRoutes
+    ++ [
         %% File upload endpoint
         {"/upload/:upload_key", shurbej_http_upload, #{}},
 
@@ -86,4 +53,48 @@ routes() ->
         %% Web UI (built SPA — catch-all, must be last)
         {"/assets/[...]", cowboy_static, {dir, "web/dist/assets"}},
         {"/[...]", shurbej_http_spa, #{}}
+    ].
+
+%% Produce the library-scoped route set for a given path prefix.
+%% Used for both /users/:user_id and /groups/:group_id.
+library_routes(Prefix) ->
+    [
+        %% Items
+        {Prefix ++ "/items", shurbej_http_items, #{scope => all}},
+        {Prefix ++ "/items/top", shurbej_http_items, #{scope => top}},
+        {Prefix ++ "/items/trash", shurbej_http_items, #{scope => trash}},
+        {Prefix ++ "/items/:item_key", shurbej_http_items, #{scope => single}},
+        {Prefix ++ "/items/:item_key/children", shurbej_http_items, #{scope => children}},
+        {Prefix ++ "/items/:item_key/tags", shurbej_http_tags, #{scope => item_tags}},
+
+        %% Collections
+        {Prefix ++ "/collections", shurbej_http_collections, #{scope => all}},
+        {Prefix ++ "/collections/top", shurbej_http_collections, #{scope => top}},
+        {Prefix ++ "/collections/:coll_key", shurbej_http_collections, #{scope => single}},
+        {Prefix ++ "/collections/:coll_key/collections", shurbej_http_collections, #{scope => subcollections}},
+        {Prefix ++ "/collections/:coll_key/items", shurbej_http_items, #{scope => collection}},
+        {Prefix ++ "/collections/:coll_key/items/top", shurbej_http_items, #{scope => collection_top}},
+
+        %% Searches
+        {Prefix ++ "/searches", shurbej_http_searches, #{scope => all}},
+        {Prefix ++ "/searches/:search_key", shurbej_http_searches, #{scope => single}},
+
+        %% Tags
+        {Prefix ++ "/tags", shurbej_http_tags, #{scope => all}},
+
+        %% Settings
+        {Prefix ++ "/settings", shurbej_http_settings, #{scope => all}},
+        {Prefix ++ "/settings/:setting_key", shurbej_http_settings, #{scope => single}},
+
+        %% Deleted
+        {Prefix ++ "/deleted", shurbej_http_deleted, #{}},
+
+        %% Full-text
+        {Prefix ++ "/fulltext", shurbej_http_fulltext, #{scope => versions}},
+        {Prefix ++ "/items/:item_key/fulltext", shurbej_http_fulltext, #{scope => single}},
+
+        %% Files
+        {Prefix ++ "/items/:item_key/file", shurbej_http_files, #{}},
+        {Prefix ++ "/items/:item_key/file/view", shurbej_http_files, #{action => view}},
+        {Prefix ++ "/items/:item_key/file/view/url", shurbej_http_files, #{action => view_url}}
     ].

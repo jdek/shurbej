@@ -47,4 +47,10 @@ The web UI has a PDF viewer (pdf.js, multi-tab with LRU caching), customizable s
 
 ## What doesn't
 
-Group libraries, OAuth 1.0a, export formats (bibtex/RIS/CSL), partial file upload (xdelta/bsdiff), publications, `include` parameter, backoff header.
+OAuth 1.0a, export formats (bibtex/RIS/CSL), `include` parameter, backoff header.
+
+Group libraries are supported server-side (`/groups/:id/...`, streaming, admin helpers), but the web UI has no group picker yet.
+
+Publications (`/users/:id/publications/items`) are intentionally omitted.
+
+Partial file upload (`PATCH /items/:key/file?algorithm=xdelta|vcdiff|bsdiff`) is also unimplemented, but the official Zotero desktop client does not use it — it always does a full-file upload. Only relevant for third-party clients.

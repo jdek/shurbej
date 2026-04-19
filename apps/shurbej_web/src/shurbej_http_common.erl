@@ -6,7 +6,8 @@
     authenticate/1,
     authorize/1,
     check_perm/1,
-    library_id/1,
+    lib_ref/1,
+    lib_path_prefix/1,
     get_since/1,
     get_format/1,
     get_if_unmodified/1,
@@ -40,11 +41,13 @@
     sanitize_filename/1,
     validate_md5/1,
     base_url/0,
+    library_obj/1,
     envelope_item/2,
     envelope_item/3,
     envelope_collection/2,
     envelope_search/2,
-    auth_error_response/2
+    auth_error_response/2,
+    maybe_backoff/1
 ]).
 
 -define(MAX_BODY_SIZE, 8_000_000). %% 8MB
@@ -82,34 +85,67 @@ authenticate(Req) ->
     end.
 
 %% Authenticate AND authorize — verify API key AND that the authenticated
-%% user owns the library specified in the URL path. Prevents IDOR.
+%% user has access to the library specified in the URL path.
+%% Returns {ok, LibRef, Req} where LibRef is the library being accessed,
+%% or the authenticated user's own library when no library scope is in URL.
 authorize(Req) ->
     case authenticate(Req) of
         {ok, UserId, Req2} ->
             case shurbej_rate_limit:check(UserId) of
-                {error, rate_limited} ->
-                    {error, rate_limited, Req2};
+                {error, rate_limited, Retry} ->
+                    {error, {rate_limited, Retry}, Req2};
+                {backoff, Secs} ->
+                    put(shurbej_backoff, Secs),
+                    authorize_path(UserId, Req2);
                 ok ->
-                    case cowboy_req:binding(user_id, Req2) of
-                        undefined ->
-                            %% Endpoints without :user_id (e.g., /schema, /items/new)
-                            {ok, UserId, Req2};
-                        UserIdBin ->
-                            case safe_int(UserIdBin) of
-                                {ok, UserId} -> {ok, UserId, Req2};
-                                {ok, _Other} -> {error, forbidden, Req2};
-                                error -> {error, bad_request, Req2}
-                            end
-                    end
+                    authorize_path(UserId, Req2)
             end;
         {error, Req2} ->
             {error, forbidden, Req2}
     end.
 
-%% Get library ID from user_id path binding (safe).
-library_id(Req) ->
-    {ok, LibId} = safe_int(cowboy_req:binding(user_id, Req)),
-    LibId.
+authorize_path(UserId, Req) ->
+    case cowboy_req:binding(group_id, Req) of
+        undefined ->
+            case cowboy_req:binding(user_id, Req) of
+                undefined ->
+                    %% Endpoints without any library binding (e.g., /schema).
+                    {ok, {user, UserId}, Req};
+                UserIdBin ->
+                    case safe_int(UserIdBin) of
+                        {ok, UserId} -> {ok, {user, UserId}, Req};
+                        {ok, _Other} -> {error, forbidden, Req};
+                        error -> {error, bad_request, Req}
+                    end
+            end;
+        GroupIdBin ->
+            case safe_int(GroupIdBin) of
+                {ok, GroupId} ->
+                    case shurbej_db:get_group_member(GroupId, UserId) of
+                        {ok, _} -> {ok, {group, GroupId}, Req};
+                        undefined -> {error, forbidden, Req}
+                    end;
+                error -> {error, bad_request, Req}
+            end
+    end.
+
+%% Get the LibRef from the URL path bindings (safe).
+%% Returns {user, UserId} | {group, GroupId}.
+lib_ref(Req) ->
+    case cowboy_req:binding(group_id, Req) of
+        undefined ->
+            {ok, UserId} = safe_int(cowboy_req:binding(user_id, Req)),
+            {user, UserId};
+        GroupIdBin ->
+            {ok, GroupId} = safe_int(GroupIdBin),
+            {group, GroupId}
+    end.
+
+%% URL path prefix for a library (e.g. /users/1 or /groups/42).
+lib_path_prefix({user, Id}) ->
+    <<"/users/", (integer_to_binary(Id))/binary>>;
+lib_path_prefix({group, Id}) ->
+    <<"/groups/", (integer_to_binary(Id))/binary>>.
 
 %% ===================================================================
 %% Permissions
@@ -323,7 +359,7 @@ list_response(Req, Items, LibVersion, EnvelopeFn) ->
         <<"zotero-api-version">> => <<"3">>
     },
     Headers2 = add_link_headers(Headers, Req, Start, Limit, Total),
-    cowboy_req:reply(200, Headers2, simdjson:encode(Enveloped), Req).
+    cowboy_req:reply(200, maybe_backoff(Headers2), simdjson:encode(Enveloped), Req).
 
 add_link_headers(Headers, Req, Start, Limit, Total) ->
     Base = page_base_url(Req),
@@ -358,9 +394,9 @@ strip_qs_params(QS, Remove) ->
 check_304(Req, LibVersion) ->
     case get_if_modified(Req) of
         V when is_integer(V), V >= LibVersion ->
-            {304, cowboy_req:reply(304, #{
+            {304, cowboy_req:reply(304, maybe_backoff(#{
                 <<"last-modified-version">> => integer_to_binary(LibVersion)
-            }, Req)};
+            }), Req)};
         _ ->
             continue
     end.
@@ -370,9 +406,9 @@ filter_by_keys(Records, Keys) ->
     KeySet = sets:from_list(Keys),
     [R || R <- Records, sets:is_element(record_key(R), KeySet)].
 
-record_key(#shurbej_collection{id = {_, K}}) -> K;
-record_key(#shurbej_search{id = {_, K}}) -> K;
-record_key(#shurbej_item{id = {_, K}}) -> K.
+record_key(#shurbej_collection{id = {_, _, K}}) -> K;
+record_key(#shurbej_search{id = {_, _, K}}) -> K;
+record_key(#shurbej_item{id = {_, _, K}}) -> K.
 
 filter_by_tag(Items, none) -> Items;
 filter_by_tag(Items, Tag) ->
@@ -416,29 +452,40 @@ matches_query(Data, Query, _TitleCreatorYear) ->
 %% ===================================================================
 
 json_response(StatusCode, Body, Req) ->
-    cowboy_req:reply(StatusCode, #{
+    cowboy_req:reply(StatusCode, maybe_backoff(#{
         <<"content-type">> => <<"application/json">>,
         <<"zotero-api-version">> => <<"3">>
-    }, simdjson:encode(Body), Req).
+    }), simdjson:encode(Body), Req).
 
 json_response(StatusCode, Body, Version, Req) ->
-    cowboy_req:reply(StatusCode, #{
+    cowboy_req:reply(StatusCode, maybe_backoff(#{
         <<"content-type">> => <<"application/json">>,
         <<"last-modified-version">> => integer_to_binary(Version),
         <<"zotero-api-version">> => <<"3">>
-    }, simdjson:encode(Body), Req).
+    }), simdjson:encode(Body), Req).
 
 error_response(StatusCode, Message, Req) ->
     json_response(StatusCode, #{<<"message">> => Message}, Req).
 
-auth_error_response(rate_limited, Req) ->
+auth_error_response({rate_limited, RetryAfter}, Req) ->
     cowboy_req:reply(429, #{
         <<"content-type">> => <<"application/json">>,
-        <<"retry-after">> => <<"60">>,
+        <<"retry-after">> => integer_to_binary(RetryAfter),
         <<"zotero-api-version">> => <<"3">>
     }, simdjson:encode(#{<<"message">> => <<"Rate limit exceeded. Try again later.">>}), Req);
+auth_error_response(rate_limited, Req) ->
+    auth_error_response({rate_limited, 60}, Req);
 auth_error_response(_, Req) ->
     error_response(403, <<"Forbidden">>, Req).
+
+%% Inject Backoff header if the rate limiter stashed a hint during authorize/1.
+maybe_backoff(Headers) ->
+    case erase(shurbej_backoff) of
+        undefined -> Headers;
+        Secs when is_integer(Secs), Secs > 0 ->
+            Headers#{<<"backoff">> => integer_to_binary(Secs)};
+        _ -> Headers
+    end.
 
 %% ===================================================================
 %% Envelope helpers — wrap raw data in Zotero API format
@@ -447,24 +494,30 @@ auth_error_response(_, Req) ->
 base_url() ->
     to_binary(application:get_env(shurbej, base_url, <<"http://localhost:8080">>)).
 
-envelope_item(LibId, Item) ->
-    envelope_item(LibId, Item, #{}).
+library_obj({user, Id}) ->
+    #{<<"type">> => <<"user">>, <<"id">> => Id};
+library_obj({group, Id}) ->
+    #{<<"type">> => <<"group">>, <<"id">> => Id}.
 
-envelope_item(LibId, #shurbej_item{id = {_, Key}, version = Version, data = Data}, ChildrenCounts) ->
+envelope_item(LibRef, Item) ->
+    envelope_item(LibRef, Item, #{}).
+
+envelope_item(LibRef, #shurbej_item{id = {_, _, Key}, version = Version, data = Data},
+              ChildrenCounts) ->
     Base = base_url(),
-    LibBin = integer_to_binary(LibId),
+    Prefix = lib_path_prefix(LibRef),
     NumChildren = maps:get(Key, ChildrenCounts, 0),
     #{
         <<"key">> => Key,
         <<"version">> => Version,
-        <<"library">> => library_obj(LibId),
+        <<"library">> => library_obj(LibRef),
         <<"links">> => #{
             <<"self">> => #{
-                <<"href">> => <<Base/binary, "/users/", LibBin/binary, "/items/", Key/binary>>,
+                <<"href">> => <<Base/binary, Prefix/binary, "/items/", Key/binary>>,
                 <<"type">> => <<"application/json">>
             },
             <<"alternate">> => #{
-                <<"href">> => <<Base/binary, "/users/", LibBin/binary, "/items/", Key/binary>>,
+                <<"href">> => <<Base/binary, Prefix/binary, "/items/", Key/binary>>,
                 <<"type">> => <<"text/html">>
             }
         },
@@ -472,17 +525,17 @@ envelope_item(LibId, #shurbej_item{id = {_, Key}, version = Version, data = Data
         <<"data">> => Data#{<<"key">> => Key, <<"version">> => Version}
     }.
 
-envelope_collection(LibId, #shurbej_collection{id = {_, Key}, version = Version, data = Data}) ->
+envelope_collection(LibRef, #shurbej_collection{id = {_, _, Key}, version = Version, data = Data}) ->
     Base = base_url(),
-    LibBin = integer_to_binary(LibId),
+    Prefix = lib_path_prefix(LibRef),
     NumColls = maps:get(<<"numCollections">>, Data, 0),
     #{
         <<"key">> => Key,
         <<"version">> => Version,
-        <<"library">> => library_obj(LibId),
+        <<"library">> => library_obj(LibRef),
         <<"links">> => #{
             <<"self">> => #{
-                <<"href">> => <<Base/binary, "/users/", LibBin/binary, "/collections/", Key/binary>>,
+                <<"href">> => <<Base/binary, Prefix/binary, "/collections/", Key/binary>>,
                 <<"type">> => <<"application/json">>
             }
         },
@@ -490,25 +543,22 @@ envelope_collection(LibId, #shurbej_collection{id = {_, Key}, version = Version,
         <<"data">> => Data#{<<"key">> => Key, <<"version">> => Version}
     }.
 
-envelope_search(LibId, #shurbej_search{id = {_, Key}, version = Version, data = Data}) ->
+envelope_search(LibRef, #shurbej_search{id = {_, _, Key}, version = Version, data = Data}) ->
     Base = base_url(),
-    LibBin = integer_to_binary(LibId),
+    Prefix = lib_path_prefix(LibRef),
     #{
         <<"key">> => Key,
         <<"version">> => Version,
-        <<"library">> => library_obj(LibId),
+        <<"library">> => library_obj(LibRef),
         <<"links">> => #{
             <<"self">> => #{
-                <<"href">> => <<Base/binary, "/users/", LibBin/binary, "/searches/", Key/binary>>,
+                <<"href">> => <<Base/binary, Prefix/binary, "/searches/", Key/binary>>,
                 <<"type">> => <<"application/json">>
             }
         },
         <<"meta">> => #{},
         <<"data">> => Data#{<<"key">> => Key, <<"version">> => Version}
     }.
-
-library_obj(LibId) ->
-    #{<<"type">> => <<"user">>, <<"id">> => LibId}.
 
 maybe_decompress(Body, Req) ->
     case cowboy_req:header(<<"content-encoding">>, Req) of

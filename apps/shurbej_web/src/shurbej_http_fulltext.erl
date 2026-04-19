@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -22,24 +22,24 @@ init(Req0, State) ->
 needs_write(<<"PUT">>) -> true;
 needs_write(_) -> false.
 
-%% GET /users/:user_id/fulltext — list versions of all full-text entries
+%% GET /<lib>/fulltext — list versions of all full-text entries
 handle(<<"GET">>, Req0, #{scope := versions} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    LibRef = shurbej_http_common:lib_ref(Req0),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:check_304(Req0, LibVersion) of
         {304, Req} -> {ok, Req, State};
         continue ->
             Since = shurbej_http_common:get_since(Req0),
-            Pairs = shurbej_db:list_fulltext_versions(LibId, Since),
+            Pairs = shurbej_db:list_fulltext_versions(LibRef, Since),
             Req = shurbej_http_common:json_response(200, maps:from_list(Pairs), LibVersion, Req0),
             {ok, Req, State}
     end;
 
-%% GET /users/:user_id/items/:item_key/fulltext
+%% GET /<lib>/items/:item_key/fulltext
 handle(<<"GET">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
-    case shurbej_db:get_fulltext(LibId, ItemKey) of
+    case shurbej_db:get_fulltext(LibRef, ItemKey) of
         {ok, #shurbej_fulltext{content = Content, version = Version,
                                indexed_pages = IP, total_pages = TP,
                                indexed_chars = IC, total_chars = TC}} ->
@@ -55,9 +55,9 @@ handle(<<"GET">>, Req0, #{scope := single} = State) ->
             {ok, Req, State}
     end;
 
-%% PUT /users/:user_id/items/:item_key/fulltext — with input validation
+%% PUT /<lib>/items/:item_key/fulltext — with input validation
 handle(<<"PUT">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
@@ -71,9 +71,9 @@ handle(<<"PUT">>, Req0, #{scope := single} = State) ->
             {ok, Req, State};
         ok ->
             Content = maps:get(<<"content">>, Data, <<>>),
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                 shurbej_db:write_fulltext(#shurbej_fulltext{
-                    id = {LibId, ItemKey},
+                    id = {LT, LI, ItemKey},
                     version = NewVersion,
                     content = Content,
                     indexed_pages = to_int(maps:get(<<"indexedPages">>, Data, 0)),

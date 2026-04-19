@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -26,11 +26,11 @@ needs_write(<<"DELETE">>) -> true;
 needs_write(_) -> false.
 
 handle(<<"GET">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     CollKey = cowboy_req:binding(coll_key, Req0),
-    case shurbej_db:get_collection(LibId, CollKey) of
+    case shurbej_db:get_collection(LibRef, CollKey) of
         {ok, Coll} ->
-            Body = shurbej_http_common:envelope_collection(LibId, Coll),
+            Body = shurbej_http_common:envelope_collection(LibRef, Coll),
             Req = shurbej_http_common:json_response(200, Body, Coll#shurbej_collection.version, Req0),
             {ok, Req, State};
         undefined ->
@@ -39,9 +39,9 @@ handle(<<"GET">>, Req0, #{scope := single} = State) ->
     end;
 
 handle(<<"GET">>, Req0, #{scope := Scope} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     Since = shurbej_http_common:get_since(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:get_if_modified(Req0) of
         V when is_integer(V), V >= LibVersion ->
             Req = cowboy_req:reply(304, #{
@@ -50,22 +50,22 @@ handle(<<"GET">>, Req0, #{scope := Scope} = State) ->
             {ok, Req, State};
         _ ->
             Colls0 = case Scope of
-                top -> shurbej_db:list_collections_top(LibId, Since);
+                top -> shurbej_db:list_collections_top(LibRef, Since);
                 subcollections ->
                     ParentKey = cowboy_req:binding(coll_key, Req0),
-                    shurbej_db:list_subcollections(LibId, ParentKey, Since);
-                _ -> shurbej_db:list_collections(LibId, Since)
+                    shurbej_db:list_subcollections(LibRef, ParentKey, Since);
+                _ -> shurbej_db:list_collections(LibRef, Since)
             end,
             Colls = shurbej_http_common:filter_by_keys(Colls0,
                 shurbej_http_common:get_collection_keys(Req0)),
             Format = shurbej_http_common:get_format(Req0),
             case Format of
                 <<"versions">> ->
-                    Pairs = [{K, V} || #shurbej_collection{id = {_, K}, version = V} <- Colls],
+                    Pairs = [{K, V} || #shurbej_collection{id = {_, _, K}, version = V} <- Colls],
                     Req = shurbej_http_common:json_response(200, maps:from_list(Pairs), LibVersion, Req0),
                     {ok, Req, State};
                 <<"keys">> ->
-                    Keys = [K || #shurbej_collection{id = {_, K}} <- Colls],
+                    Keys = [K || #shurbej_collection{id = {_, _, K}} <- Colls],
                     Req = shurbej_http_common:json_response(200, Keys, LibVersion, Req0),
                     {ok, Req, State};
                 _ ->
@@ -73,14 +73,14 @@ handle(<<"GET">>, Req0, #{scope := Scope} = State) ->
                         shurbej_http_common:get_sort(Req0),
                         shurbej_http_common:get_direction(Req0)),
                     Req = shurbej_http_common:list_response(Req0, Sorted, LibVersion,
-                        fun(C) -> shurbej_http_common:envelope_collection(LibId, C) end),
+                        fun(C) -> shurbej_http_common:envelope_collection(LibRef, C) end),
                     {ok, Req, State}
             end
     end;
 
 %% PUT/PATCH single collection
 handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Method =:= <<"PATCH">> ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     CollKey = cowboy_req:binding(coll_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
@@ -88,7 +88,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
             Req = shurbej_http_common:error_response(400, <<"Invalid JSON">>, Req1),
             {ok, Req, State};
         {ok, Incoming, Req1} ->
-    case shurbej_db:get_collection(LibId, CollKey) of
+    case shurbej_db:get_collection(LibRef, CollKey) of
         undefined ->
             Req = shurbej_http_common:error_response(404, <<"Collection not found">>, Req1),
             {ok, Req, State};
@@ -103,20 +103,20 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
                     Req = shurbej_http_common:error_response(400, Reason, Req1),
                     {ok, Req, State};
                 ok ->
-                    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+                    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                         FullData = Coll#{<<"version">> => NewVersion},
                         shurbej_db:write_collection(#shurbej_collection{
-                            id = {LibId, CollKey}, version = NewVersion,
+                            id = {LT, LI, CollKey}, version = NewVersion,
                             data = FullData, deleted = false
                         })
                     end) of
                         {ok, NewVersion} ->
                             FullData = Coll#{<<"version">> => NewVersion},
                             Updated = #shurbej_collection{
-                                id = {LibId, CollKey}, version = NewVersion,
+                                id = {LT, LI, CollKey}, version = NewVersion,
                                 data = FullData, deleted = false
                             },
-                            Envelope = shurbej_http_common:envelope_collection(LibId, Updated),
+                            Envelope = shurbej_http_common:envelope_collection(LibRef, Updated),
                             Req = shurbej_http_common:json_response(200, Envelope, NewVersion, Req1),
                             {ok, Req, State};
                         {error, precondition, CurrentVersion} ->
@@ -130,7 +130,7 @@ handle(Method, Req0, #{scope := single} = State) when Method =:= <<"PUT">>; Meth
     end;
 
 handle(<<"POST">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
         {error, _, Req1} ->
@@ -145,12 +145,12 @@ handle(<<"POST">>, Req0, State) ->
             Req = shurbej_http_common:json_response(400, Result, Req1),
             {ok, Req, State};
         _ ->
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                 lists:foreach(fun({_Idx, Coll}) ->
                     Key = maps:get(<<"key">>, Coll),
                     FullData = Coll#{<<"key">> => Key, <<"version">> => NewVersion},
                     shurbej_db:write_collection(#shurbej_collection{
-                        id = {LibId, Key},
+                        id = {LT, LI, Key},
                         version = NewVersion,
                         data = FullData,
                         deleted = false
@@ -160,7 +160,7 @@ handle(<<"POST">>, Req0, State) ->
             end) of
                 {ok, NewVersion} ->
                     Successful = maps:from_list(
-                        [{integer_to_binary(Idx), shurbej_http_items:envelope_for_write(LibId, C, NewVersion)}
+                        [{integer_to_binary(Idx), shurbej_http_items:envelope_for_write(LibRef, C, NewVersion)}
                          || {Idx, C} <- Valid]),
                     Result = #{
                         <<"successful">> => Successful,
@@ -182,14 +182,14 @@ handle(<<"POST">>, Req0, State) ->
     end;
 
 handle(<<"DELETE">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     #{collectionKey := KeysParam} = cowboy_req:match_qs([{collectionKey, [], <<>>}], Req0),
     Keys = binary:split(KeysParam, <<",">>, [global]),
-    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
         lists:foreach(fun(K) ->
-            shurbej_db:mark_collection_deleted(LibId, K, NewVersion),
-            shurbej_db:record_deletion(LibId, <<"collection">>, K, NewVersion)
+            shurbej_db:mark_collection_deleted(LibRef, K, NewVersion),
+            shurbej_db:record_deletion(LibRef, <<"collection">>, K, NewVersion)
         end, Keys),
         ok
     end) of

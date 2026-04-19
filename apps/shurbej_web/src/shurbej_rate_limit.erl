@@ -11,20 +11,40 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% Check rate limit for a user. Direct ETS access (no gen_server bottleneck).
+%% Returns:
+%%   ok                              — under soft threshold, no hint
+%%   {backoff, Secs}                 — past soft threshold, advise client to pause
+%%   {error, rate_limited, Retry}    — past hard limit, 429 with Retry-After
 check(UserId) ->
     MaxReqs = application:get_env(shurbej, rate_limit_max, 1000),
     WindowSecs = application:get_env(shurbej, rate_limit_window, 60),
+    SoftPct = application:get_env(shurbej, rate_limit_soft_pct, 80),
     Now = erlang:system_time(second),
     Window = Now div WindowSecs,
     Key = {UserId, Window},
-    try ets:update_counter(?TABLE, Key, {2, 1}) of
-        Count when Count > MaxReqs -> {error, rate_limited};
-        _ -> ok
-    catch
-        error:badarg ->
-            ets:insert_new(?TABLE, {Key, 1}),
+    Count = try ets:update_counter(?TABLE, Key, {2, 1})
+    catch error:badarg ->
+        ets:insert_new(?TABLE, {Key, 0}),
+        ets:update_counter(?TABLE, Key, {2, 1})
+    end,
+    RetryAfter = WindowSecs - (Now rem WindowSecs),
+    SoftCount = (MaxReqs * SoftPct) div 100,
+    if
+        Count > MaxReqs ->
+            {error, rate_limited, RetryAfter};
+        Count > SoftCount ->
+            {backoff, backoff_secs(Count, SoftCount, MaxReqs, WindowSecs)};
+        true ->
             ok
     end.
+
+%% Linear backoff from 1s at soft threshold to half the window at the hard limit.
+backoff_secs(Count, Soft, Hard, WindowSecs) when Hard > Soft ->
+    MaxBackoff = max(1, WindowSecs div 2),
+    Step = max(1, ((Count - Soft) * MaxBackoff) div max(1, Hard - Soft)),
+    min(MaxBackoff, Step);
+backoff_secs(_, _, _, WindowSecs) ->
+    max(1, WindowSecs div 2).
 
 init([]) ->
     ets:new(?TABLE, [named_table, public, set, {write_concurrency, true}]),

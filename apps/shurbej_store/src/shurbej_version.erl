@@ -6,41 +6,43 @@
 -export([get/1, write/3]).
 -export([init/1, handle_call/3, handle_cast/2]).
 
-start_link(LibraryId) ->
-    gen_server:start_link({global, {?MODULE, LibraryId}}, ?MODULE, LibraryId, []).
+start_link(LibRef) ->
+    gen_server:start_link({global, {?MODULE, LibRef}}, ?MODULE, LibRef, []).
 
 %% Get current library version.
-get(LibraryId) ->
-    call(LibraryId, get_version).
+get(LibRef) ->
+    call(LibRef, get_version).
 
 %% Execute a write operation with version tracking.
 %% WriteFun is called as WriteFun(NewVersion) and must return ok | {error, _}.
 %% Returns {ok, NewVersion} | {error, precondition, CurrentVersion} | {error, _}.
-write(LibraryId, ExpectedVersion, WriteFun) ->
-    call(LibraryId, {write, ExpectedVersion, WriteFun}).
+write(LibRef, ExpectedVersion, WriteFun) ->
+    call(LibRef, {write, ExpectedVersion, WriteFun}).
 
 %% gen_server callbacks
 
-init(LibraryId) ->
-    case shurbej_db:get_library(LibraryId) of
+init(LibRef) ->
+    ok = shurbej_db:ensure_library(LibRef),
+    case shurbej_db:get_library(LibRef) of
         {ok, #shurbej_library{version = Version}} ->
-            {ok, #{library_id => LibraryId, version => Version}};
+            {ok, #{lib_ref => LibRef, version => Version}};
         undefined ->
-            {stop, {unknown_library, LibraryId}}
+            {stop, {unknown_library, LibRef}}
     end.
 
 handle_call(get_version, _From, #{version := V} = State) ->
     {reply, {ok, V}, State};
 
-handle_call({write, ExpectedVersion, WriteFun}, _From, #{library_id := LibId, version := Current} = State) ->
+handle_call({write, ExpectedVersion, WriteFun}, _From,
+            #{lib_ref := LibRef, version := Current} = State) ->
     case ExpectedVersion of
         any ->
-            do_write(LibId, Current, WriteFun, State);
+            do_write(LibRef, Current, WriteFun, State);
         Current ->
-            do_write(LibId, Current, WriteFun, State);
+            do_write(LibRef, Current, WriteFun, State);
         _ when Current =:= 0 ->
             %% Fresh library — fast-forward to client's version for migration
-            do_write(LibId, ExpectedVersion, WriteFun, State);
+            do_write(LibRef, ExpectedVersion, WriteFun, State);
         _ ->
             {reply, {error, precondition, Current}, State}
     end;
@@ -53,15 +55,13 @@ handle_cast(_Msg, State) ->
 
 %% Internal
 
-do_write(LibId, Current, WriteFun, State) ->
+do_write(LibRef, Current, WriteFun, State) ->
     NewVersion = Current + 1,
     %% Execute write + version update atomically in a Mnesia transaction
     case mnesia:transaction(fun() ->
         case WriteFun(NewVersion) of
             ok ->
-                mnesia:write(#shurbej_library{
-                    library_id = LibId, library_type = user, version = NewVersion
-                }),
+                mnesia:write(#shurbej_library{ref = LibRef, version = NewVersion}),
                 ok;
             {error, _} = Err ->
                 mnesia:abort(Err)
@@ -69,7 +69,7 @@ do_write(LibId, Current, WriteFun, State) ->
     end) of
         {atomic, ok} ->
             %% Notify stream subscribers via pg (no compile-time dependency)
-            Topic = <<"/users/", (integer_to_binary(LibId))/binary>>,
+            Topic = topic(LibRef),
             try
                 Members = pg:get_members(shurbej_stream, Topic),
                 [Pid ! {topic_updated, Topic, NewVersion} || Pid <- Members]
@@ -82,10 +82,15 @@ do_write(LibId, Current, WriteFun, State) ->
             {reply, {error, Reason}, State}
     end.
 
-call(LibraryId, Msg) ->
-    case global:whereis_name({?MODULE, LibraryId}) of
+topic({user, Id}) ->
+    <<"/users/", (integer_to_binary(Id))/binary>>;
+topic({group, Id}) ->
+    <<"/groups/", (integer_to_binary(Id))/binary>>.
+
+call(LibRef, Msg) ->
+    case global:whereis_name({?MODULE, LibRef}) of
         undefined ->
-            case shurbej_version_sup:start_child(LibraryId) of
+            case shurbej_version_sup:start_child(LibRef) of
                 {ok, Pid} ->
                     gen_server:call(Pid, Msg);
                 {error, {already_started, Pid}} ->

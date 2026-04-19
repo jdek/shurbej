@@ -4,6 +4,8 @@
 %% Clients subscribe to library topics and receive topicUpdated events
 %% when library versions change. Uses pg (process groups) for pub/sub.
 
+-include_lib("shurbej_store/include/shurbej_records.hrl").
+
 -export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 
 -define(SCOPE, shurbej_stream).
@@ -25,18 +27,18 @@ websocket_init(#{api_key := ApiKey} = State) ->
             Reply = simdjson:encode(#{<<"event">> => <<"connected">>, <<"retry">> => ?RETRY_MS}),
             {reply, {text, Reply}, State#{subscriptions => #{}, single_key => false}};
         Key ->
-            %% Single-key connection — auto-subscribe to user's library
+            %% Single-key connection — auto-subscribe to user's library + groups
             case shurbej_auth:verify(Key) of
                 {ok, UserId} ->
-                    Topic = user_topic(UserId),
-                    pg:join(?SCOPE, Topic, self()),
+                    Topics = allowed_topics(UserId),
+                    [pg:join(?SCOPE, T, self()) || T <- Topics],
                     Reply = simdjson:encode(#{
                         <<"event">> => <<"connected">>,
                         <<"retry">> => ?RETRY_MS,
-                        <<"topics">> => [Topic]
+                        <<"topics">> => Topics
                     }),
                     {reply, {text, Reply},
-                     State#{subscriptions => #{Key => [Topic]}, single_key => true}};
+                     State#{subscriptions => #{Key => Topics}, single_key => true}};
                 {error, _} ->
                     {reply, {close, 4403, <<"Forbidden">>}, State}
             end
@@ -122,7 +124,7 @@ process_creates(Subs, State) ->
             _ ->
                 case shurbej_auth:verify(Key) of
                     {ok, UserId} ->
-                        Allowed = [user_topic(UserId)],
+                        Allowed = allowed_topics(UserId),
                         Topics = case ReqTopics of
                             undefined -> Allowed;
                             T when is_list(T) ->
@@ -175,5 +177,14 @@ process_deletes(Subs, State) ->
 %% Internal
 %% ===================================================================
 
-user_topic(UserId) ->
-    <<"/users/", (integer_to_binary(UserId))/binary>>.
+%% Topics the given user is allowed to subscribe to:
+%% their own /users/:id plus /groups/:id for every group they belong to.
+allowed_topics(UserId) ->
+    UserTopic = <<"/users/", (integer_to_binary(UserId))/binary>>,
+    GroupTopics = [group_topic(GroupId)
+                   || #shurbej_group_member{id = {GroupId, _}}
+                      <- shurbej_db:list_user_groups(UserId)],
+    [UserTopic | GroupTopics].
+
+group_topic(GroupId) ->
+    <<"/groups/", (integer_to_binary(GroupId))/binary>>.

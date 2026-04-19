@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -25,9 +25,9 @@ needs_write(<<"DELETE">>) -> true;
 needs_write(_) -> false.
 
 handle(<<"GET">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     SettingKey = cowboy_req:binding(setting_key, Req0),
-    case shurbej_db:get_setting(LibId, SettingKey) of
+    case shurbej_db:get_setting(LibRef, SettingKey) of
         {ok, #shurbej_setting{value = Value, version = Version}} ->
             Body = #{<<"value">> => Value, <<"version">> => Version},
             Req = shurbej_http_common:json_response(200, Body, Version, Req0),
@@ -38,20 +38,20 @@ handle(<<"GET">>, Req0, #{scope := single} = State) ->
     end;
 
 handle(<<"GET">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     Since = shurbej_http_common:get_since(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:get_if_modified(Req0) of
         V when is_integer(V), V >= LibVersion ->
             Req = cowboy_req:reply(304, #{
                 <<"last-modified-version">> => integer_to_binary(LibVersion)
             }, Req0),
             {ok, Req, State};
-        _ -> handle_get_list(Req0, LibId, Since, LibVersion, State)
+        _ -> handle_get_list(Req0, LibRef, Since, LibVersion, State)
     end;
 
 handle(<<"POST">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
         {error, _, Req1} ->
@@ -75,14 +75,14 @@ handle(<<"POST">>, Req0, State) ->
                 <<"Invalid setting '", BadKey/binary, "': ", Reason/binary>>, Req1),
             {ok, Req, State};
         [] ->
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                 maps:foreach(fun(Key, ValObj) ->
                     Value = case is_map(ValObj) of
                         true -> maps:get(<<"value">>, ValObj, ValObj);
                         false -> ValObj
                     end,
                     shurbej_db:write_setting(#shurbej_setting{
-                        id = {LibId, Key},
+                        id = {LT, LI, Key},
                         version = NewVersion,
                         value = Value
                     })
@@ -108,7 +108,7 @@ handle(<<"POST">>, Req0, State) ->
 
 %% PUT /settings/:setting_key — create or update a single setting
 handle(<<"PUT">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    {LT, LI} = LibRef = shurbej_http_common:lib_ref(Req0),
     SettingKey = cowboy_req:binding(setting_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     case shurbej_http_common:read_json_body(Req0) of
@@ -126,9 +126,9 @@ handle(<<"PUT">>, Req0, #{scope := single} = State) ->
                     Req = shurbej_http_common:error_response(400, Reason2, Req1),
                     {ok, Req, State};
                 ok ->
-                    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
+                    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
                         shurbej_db:write_setting(#shurbej_setting{
-                            id = {LibId, SettingKey},
+                            id = {LT, LI, SettingKey},
                             version = NewVersion,
                             value = Value
                         }),
@@ -150,12 +150,12 @@ handle(<<"PUT">>, Req0, #{scope := single} = State) ->
 
 %% DELETE /settings/:setting_key
 handle(<<"DELETE">>, Req0, #{scope := single} = State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     SettingKey = cowboy_req:binding(setting_key, Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
-    case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
-        shurbej_db:delete_setting(LibId, SettingKey),
-        shurbej_db:record_deletion(LibId, <<"setting">>, SettingKey, NewVersion),
+    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
+        shurbej_db:delete_setting(LibRef, SettingKey),
+        shurbej_db:record_deletion(LibRef, <<"setting">>, SettingKey, NewVersion),
         ok
     end) of
         {ok, NewVersion} ->
@@ -174,18 +174,18 @@ handle(_, Req0, State) ->
     Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),
     {ok, Req, State}.
 
-handle_get_list(Req0, LibId, Since, LibVersion, State) ->
+handle_get_list(Req0, LibRef, Since, LibVersion, State) ->
     Format = shurbej_http_common:get_format(Req0),
     case Format of
         <<"versions">> ->
-            Pairs = shurbej_db:list_setting_versions(LibId, Since),
+            Pairs = shurbej_db:list_setting_versions(LibRef, Since),
             Req = shurbej_http_common:json_response(200, maps:from_list(Pairs), LibVersion, Req0),
             {ok, Req, State};
         _ ->
-            Settings = shurbej_db:list_settings(LibId, Since),
+            Settings = shurbej_db:list_settings(LibRef, Since),
             Map = maps:from_list([{Key, #{<<"value">> => S#shurbej_setting.value,
                                           <<"version">> => S#shurbej_setting.version}}
-                                  || #shurbej_setting{id = {_, Key}} = S <- Settings]),
+                                  || #shurbej_setting{id = {_, _, Key}} = S <- Settings]),
             Req = shurbej_http_common:json_response(200, Map, LibVersion, Req0),
             {ok, Req, State}
     end.

@@ -256,6 +256,8 @@
 
     %% Coverage: rate limiting
     rate_limit_login/1,
+    backoff_header_soft_threshold/1,
+    backoff_retry_after_on_429/1,
 
     %% Coverage: SPA, stub, upload
     spa_serves_html_for_browser/1,
@@ -420,6 +422,8 @@ all() ->
         settings_single_delete,
         file_upload_zip,
         rate_limit_login,
+        backoff_header_soft_threshold,
+        backoff_retry_after_on_429,
         spa_serves_html_for_browser,
         stub_retractions,
         stub_405,
@@ -566,7 +570,7 @@ items_delete(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"To Delete">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     {404, _, _} = get_json("/users/1/items/" ++ binary_to_list(Key), Config),
     ok.
@@ -616,7 +620,7 @@ collections_crud(Config) ->
     case Key of
         undefined -> ok;
         _ ->
-            {ok, Version} = shurbej_version:get(1),
+            {ok, Version} = shurbej_version:get({user, 1}),
             {204, _, _} = delete_req("/users/1/collections?collectionKey=" ++ binary_to_list(Key), Version, Config)
     end,
     ok.
@@ -669,7 +673,7 @@ deleted_tracking(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Will Delete">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     DeletedItems = maps:get(<<"items">>, Deleted),
@@ -727,7 +731,7 @@ items_scope_trash(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Trashed Book">>},
     {200, _, CBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CBody),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% /items/trash should contain the deleted item
     {200, _, TrashItems} = get_json("/users/1/items/trash", Config),
@@ -896,8 +900,8 @@ items_native_terms(Config) ->
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
     %% Read directly from Mnesia
-    [{shurbej_item, {1, Key}, _Version, Data, false, _ParentKey}] =
-        mnesia:dirty_read(shurbej_item, {1, Key}),
+    [{shurbej_item, {user, 1, Key}, _Version, Data, false, _ParentKey}] =
+        mnesia:dirty_read(shurbej_item, {user, 1, Key}),
     %% Data should be a map, not a binary/string
     ?assert(is_map(Data)),
     ?assertEqual(<<"Native Term Test">>, maps:get(<<"title">>, Data)),
@@ -1245,7 +1249,7 @@ item_put_update(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Put Original">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {200, _, Got} = put_json_versioned("/users/1/items/" ++ binary_to_list(Key),
         #{<<"itemType">> => <<"book">>, <<"title">> => <<"Put Replaced">>}, Version, Config),
     ?assertEqual(<<"Put Replaced">>, maps:get(<<"title">>, maps:get(<<"data">>, Got))),
@@ -1255,7 +1259,7 @@ item_patch_merge(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Patch Original">>, <<"date">> => <<"2024">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {200, _, Got} = patch_json("/users/1/items/" ++ binary_to_list(Key),
         #{<<"title">> => <<"Patch Merged">>}, Version, Config),
     Data = maps:get(<<"data">>, Got),
@@ -1267,7 +1271,7 @@ collection_patch(Config) ->
     Coll = #{<<"name">> => <<"Patch Coll">>},
     {200, _, CB} = post_json("/users/1/collections", [Coll], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {200, _, Got} = patch_json("/users/1/collections/" ++ binary_to_list(Key),
         #{<<"name">> => <<"Patched Name">>}, Version, Config),
     ?assertEqual(<<"Patched Name">>, maps:get(<<"name">>, maps:get(<<"data">>, Got))),
@@ -1277,7 +1281,7 @@ search_patch(Config) ->
     Search = #{<<"name">> => <<"Patch Search">>, <<"conditions">> => []},
     {200, _, CB} = post_json("/users/1/searches", [Search], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {200, _, Got} = patch_json("/users/1/searches/" ++ binary_to_list(Key),
         #{<<"name">> => <<"Patched Search">>}, Version, Config),
     ?assertEqual(<<"Patched Search">>, maps:get(<<"name">>, maps:get(<<"data">>, Got))),
@@ -1389,7 +1393,7 @@ include_trashed(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Include Trashed Test">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% Without includeTrashed — should not appear
     {200, _, Without} = get_json("/users/1/items?since=0&limit=100", Config),
@@ -1633,7 +1637,7 @@ collections_delete(Config) ->
     Coll = #{<<"name">> => <<"Del Coll">>},
     {200, _, CB} = post_json("/users/1/collections", [Coll], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/collections?collectionKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     ?assert(lists:member(Key, maps:get(<<"collections">>, Deleted))),
@@ -1643,7 +1647,7 @@ searches_delete(Config) ->
     Search = #{<<"name">> => <<"Del Search">>, <<"conditions">> => []},
     {200, _, CB} = post_json("/users/1/searches", [Search], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/searches?searchKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     ?assert(lists:member(Key, maps:get(<<"searches">>, Deleted))),
@@ -1889,12 +1893,12 @@ file_cascade_delete(Config) ->
     {204, _, _} = put_json("/users/1/items/" ++ binary_to_list(Key) ++ "/fulltext",
         #{<<"content">> => <<"test">>}, Config),
     %% Now delete the item
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% File metadata should be gone
-    ?assertEqual(undefined, shurbej_db:get_file_meta(1, Key)),
+    ?assertEqual(undefined, shurbej_db:get_file_meta({user, 1}, Key)),
     %% Fulltext should be gone
-    ?assertEqual(undefined, shurbej_db:get_fulltext(1, Key)),
+    ?assertEqual(undefined, shurbej_db:get_fulltext({user, 1}, Key)),
     ok.
 
 %% ===================================================================
@@ -2017,7 +2021,7 @@ item_template_attachment(Config) ->
     ok.
 
 put_nonexistent_item(Config) ->
-    {ok, Version} = shurbej_version:get(1),
+    {ok, Version} = shurbej_version:get({user, 1}),
     {404, _, _} = put_json_versioned("/users/1/items/ZZZZZZZZ",
         #{<<"itemType">> => <<"book">>, <<"title">> => <<"Ghost">>}, Version, Config),
     ok.
@@ -2344,6 +2348,50 @@ rate_limit_login(Config) ->
                       [], [{body_format, binary}]),
     ?assertEqual(429, Status),
     ok.
+
+%% Past the soft threshold, responses carry a Backoff header.
+backoff_header_soft_threshold(Config) ->
+    OrigMax = application:get_env(shurbej, rate_limit_max, 1000),
+    OrigSoft = application:get_env(shurbej, rate_limit_soft_pct, 80),
+    try
+        application:set_env(shurbej, rate_limit_max, 10),
+        application:set_env(shurbej, rate_limit_soft_pct, 50),
+        ets:delete_all_objects(shurbej_api_rate),
+        %% 5 warmup requests (exactly at soft threshold — no backoff yet)
+        lists:foreach(fun(_) ->
+            {200, H, _} = get_json("/users/1/items", Config),
+            ?assertNot(maps:is_key(<<"backoff">>, H))
+        end, lists:seq(1, 5)),
+        %% 6th request — past soft (5), under hard (10) — should carry Backoff
+        {200, H6, _} = get_json("/users/1/items", Config),
+        ?assert(maps:is_key(<<"backoff">>, H6)),
+        BackoffSecs = binary_to_integer(maps:get(<<"backoff">>, H6)),
+        ?assert(BackoffSecs >= 1),
+        ok
+    after
+        application:set_env(shurbej, rate_limit_max, OrigMax),
+        application:set_env(shurbej, rate_limit_soft_pct, OrigSoft),
+        ets:delete_all_objects(shurbej_api_rate)
+    end.
+
+%% Past the hard limit, 429 carries Retry-After reflecting seconds until the window resets.
+backoff_retry_after_on_429(Config) ->
+    OrigMax = application:get_env(shurbej, rate_limit_max, 1000),
+    try
+        application:set_env(shurbej, rate_limit_max, 3),
+        ets:delete_all_objects(shurbej_api_rate),
+        %% Burn the budget
+        lists:foreach(fun(_) -> get_json("/users/1/items", Config) end, lists:seq(1, 4)),
+        {429, H, _} = get_json("/users/1/items", Config),
+        ?assert(maps:is_key(<<"retry-after">>, H)),
+        RetrySecs = binary_to_integer(maps:get(<<"retry-after">>, H)),
+        %% Default window is 60s — retry-after is seconds remaining in window (1..60)
+        ?assert(RetrySecs >= 1 andalso RetrySecs =< 60),
+        ok
+    after
+        application:set_env(shurbej, rate_limit_max, OrigMax),
+        ets:delete_all_objects(shurbej_api_rate)
+    end.
 
 %% ===================================================================
 %% SPA catch-all

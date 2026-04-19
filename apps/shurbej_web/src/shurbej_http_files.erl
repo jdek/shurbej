@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             case shurbej_http_common:check_perm(files) of
                 {error, forbidden} ->
                     Req = shurbej_http_common:error_response(403, <<"File access denied">>, Req0),
@@ -24,19 +24,19 @@ init(Req0, State) ->
 
 %% GET — download file by looking up metadata, serving from SHA-256 blob store
 handle(<<"GET">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
-    case shurbej_db:get_file_meta(LibId, ItemKey) of
+    case shurbej_db:get_file_meta(LibRef, ItemKey) of
         {ok, #shurbej_file_meta{md5 = Md5, sha256 = Sha256, filename = Filename}} ->
             BlobFile = shurbej_files:blob_path(Sha256),
             case filelib:is_regular(BlobFile) of
                 true ->
-                    Req = cowboy_req:reply(200, #{
+                    Req = cowboy_req:reply(200, shurbej_http_common:maybe_backoff(#{
                         <<"content-type">> => <<"application/octet-stream">>,
                         <<"content-disposition">> => <<"attachment; filename=\"",
                             (shurbej_http_common:sanitize_filename(Filename))/binary, "\"">>,
                         <<"etag">> => Md5
-                    }, {sendfile, 0, filelib:file_size(BlobFile), BlobFile}, Req0),
+                    }), {sendfile, 0, filelib:file_size(BlobFile), BlobFile}, Req0),
                     {ok, Req, State};
                 false ->
                     Req = shurbej_http_common:error_response(404, <<"File not found on disk">>, Req0),
@@ -49,7 +49,7 @@ handle(<<"GET">>, Req0, State) ->
 
 %% POST — upload authorization or file registration
 handle(<<"POST">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
     {ok, Body, Req1} = cowboy_req:read_body(Req0),
     case cowboy_req:header(<<"content-type">>, Req1) of
@@ -63,9 +63,9 @@ handle(<<"POST">>, Req0, State) ->
                     %% Registration: client confirms upload with uploadKey
                     case shurbej_files:register_upload(UploadKey) of
                         {ok, NewVersion} ->
-                            Req = cowboy_req:reply(204, #{
+                            Req = cowboy_req:reply(204, shurbej_http_common:maybe_backoff(#{
                                 <<"last-modified-version">> => integer_to_binary(NewVersion)
-                            }, Req1),
+                            }), Req1),
                             {ok, Req, State};
                         {error, not_found} ->
                             Req = shurbej_http_common:error_response(400, <<"Invalid upload key">>, Req1),
@@ -96,7 +96,7 @@ handle(<<"POST">>, Req0, State) ->
                     end,
                     IfNoneMatch = cowboy_req:header(<<"if-none-match">>, Req1),
                     IfMatch = cowboy_req:header(<<"if-match">>, Req1),
-                    ExistingMeta = shurbej_db:get_file_meta(LibId, ItemKey),
+                    ExistingMeta = shurbej_db:get_file_meta(LibRef, ItemKey),
                     case check_file_preconditions(IfNoneMatch, IfMatch, ExistingMeta) of
                         {error, precondition_required} ->
                             Req = shurbej_http_common:error_response(428,
@@ -111,12 +111,12 @@ handle(<<"POST">>, Req0, State) ->
                         {ok, #shurbej_file_meta{md5 = Md5}} ->
                             %% Bump version through the gen_server so concurrent
                             %% exists + registration responses stay ordered.
-                            {ok, NewVer} = shurbej_files:confirm_existing(LibId, ItemKey),
+                            {ok, NewVer} = shurbej_files:confirm_existing(LibRef, ItemKey),
                             Req = shurbej_http_common:json_response(200, #{<<"exists">> => 1}, NewVer, Req1),
                             {ok, Req, State};
                         _ ->
                             %% New file — require upload. SHA-256 dedup happens in store().
-                                    UploadKey = shurbej_files:prepare_upload(LibId, ItemKey, #{
+                                    UploadKey = shurbej_files:prepare_upload(LibRef, ItemKey, #{
                                         md5 => Md5, filename => Filename,
                                         filesize => Filesize, mtime => Mtime
                                     }),
@@ -150,20 +150,20 @@ handle(_, Req0, State) ->
 handle_view(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"GET">> ->
-            LibId = shurbej_http_common:library_id(Req0),
+            LibRef = shurbej_http_common:lib_ref(Req0),
             ItemKey = cowboy_req:binding(item_key, Req0),
-            case shurbej_db:get_file_meta(LibId, ItemKey) of
+            case shurbej_db:get_file_meta(LibRef, ItemKey) of
                 {ok, #shurbej_file_meta{sha256 = Sha256, filename = Filename}} ->
                     BlobFile = shurbej_files:blob_path(Sha256),
                     case filelib:is_regular(BlobFile) of
                         true ->
                             ContentType = guess_content_type(Filename),
                             SafeName = shurbej_http_common:sanitize_filename(Filename),
-                            Req = cowboy_req:reply(200, #{
+                            Req = cowboy_req:reply(200, shurbej_http_common:maybe_backoff(#{
                                 <<"content-type">> => ContentType,
                                 <<"content-disposition">> =>
                                     <<"inline; filename=\"", SafeName/binary, "\"">>
-                            }, {sendfile, 0, filelib:file_size(BlobFile), BlobFile}, Req0),
+                            }), {sendfile, 0, filelib:file_size(BlobFile), BlobFile}, Req0),
                             {ok, Req, State};
                         false ->
                             Req = shurbej_http_common:error_response(404,
@@ -184,13 +184,13 @@ handle_view(Req0, State) ->
 handle_view_url(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"GET">> ->
-            LibId = shurbej_http_common:library_id(Req0),
+            LibRef = shurbej_http_common:lib_ref(Req0),
             ItemKey = cowboy_req:binding(item_key, Req0),
-            case shurbej_db:get_file_meta(LibId, ItemKey) of
+            case shurbej_db:get_file_meta(LibRef, ItemKey) of
                 {ok, _} ->
                     Base = shurbej_http_common:base_url(),
-                    LibBin = integer_to_binary(LibId),
-                    Url = <<Base/binary, "/users/", LibBin/binary,
+                    Prefix = shurbej_http_common:lib_path_prefix(LibRef),
+                    Url = <<Base/binary, Prefix/binary,
                             "/items/", ItemKey/binary, "/file/view">>,
                     Req = shurbej_http_common:json_response(200, #{<<"url">> => Url}, Req0),
                     {ok, Req, State};

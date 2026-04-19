@@ -5,7 +5,7 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibId, _} ->
+        {ok, _LibRef, _} ->
             Method = cowboy_req:method(Req0),
             case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
                 {error, forbidden} ->
@@ -24,16 +24,16 @@ needs_write(_) -> false.
 
 %% GET — list tags (optionally scoped to items matching filters)
 handle(<<"GET">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
-    {ok, LibVersion} = shurbej_version:get(LibId),
+    LibRef = shurbej_http_common:lib_ref(Req0),
+    {ok, LibVersion} = shurbej_version:get(LibRef),
     case shurbej_http_common:check_304(Req0, LibVersion) of
         {304, Req} -> {ok, Req, State};
-        continue -> handle_get_tags(Req0, LibId, LibVersion, State)
+        continue -> handle_get_tags(Req0, LibRef, LibVersion, State)
     end;
 
 %% DELETE /tags?tag=t1||t2
 handle(<<"DELETE">>, Req0, State) ->
-    LibId = shurbej_http_common:library_id(Req0),
+    LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     #{tag := TagParam} = cowboy_req:match_qs([{tag, [], <<>>}], Req0),
     case TagParam of
@@ -42,10 +42,10 @@ handle(<<"DELETE">>, Req0, State) ->
             {ok, Req, State};
         _ ->
             TagNames = binary:split(TagParam, <<"||">>, [global]),
-            case shurbej_version:write(LibId, ExpectedVersion, fun(NewVersion) ->
-                Deleted = shurbej_db:delete_tags_by_name(LibId, TagNames),
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
+                Deleted = shurbej_db:delete_tags_by_name(LibRef, TagNames),
                 lists:foreach(fun(Tag) ->
-                    shurbej_db:record_deletion(LibId, <<"tag">>, Tag, NewVersion)
+                    shurbej_db:record_deletion(LibRef, <<"tag">>, Tag, NewVersion)
                 end, Deleted),
                 ok
             end) of
@@ -66,15 +66,15 @@ handle(_, Req0, State) ->
     Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),
     {ok, Req, State}.
 
-handle_get_tags(Req0, LibId, LibVersion, State) ->
+handle_get_tags(Req0, LibRef, LibVersion, State) ->
     Since = shurbej_http_common:get_since(Req0),
     Scope = maps:get(scope, State, all),
     TagPairs = case Scope of
         item_tags ->
             ItemKey = cowboy_req:binding(item_key, Req0),
-            shurbej_db:list_item_tags(LibId, ItemKey);
+            shurbej_db:list_item_tags(LibRef, ItemKey);
         _ ->
-            shurbej_db:list_tags(LibId, Since)
+            shurbej_db:list_tags(LibRef, Since)
     end,
     Format = shurbej_http_common:get_format(Req0),
     case Format of

@@ -29,8 +29,8 @@ blob_path(Hash) ->
     Prefix = binary_to_list(binary:part(Hash, 0, 2)),
     filename:join([Root, Prefix, binary_to_list(Hash)]).
 
-prepare_upload(LibId, ItemKey, Meta) ->
-    gen_server:call(?MODULE, {prepare, LibId, ItemKey, Meta}).
+prepare_upload(LibRef, ItemKey, Meta) ->
+    gen_server:call(?MODULE, {prepare, LibRef, ItemKey, Meta}).
 
 get_pending(UploadKey) ->
     %% Reads are safe from any process on a public/protected table
@@ -85,10 +85,10 @@ init([]) ->
     Table = ets:new(?TABLE, [named_table, protected, set]),
     {ok, #{table => Table}}.
 
-handle_call({prepare, LibId, ItemKey, Meta}, _From, State) ->
+handle_call({prepare, LibRef, ItemKey, Meta}, _From, State) ->
     UploadKey = generate_upload_key(),
     ets:insert(?TABLE, {UploadKey, #{
-        library_id => LibId,
+        lib_ref => LibRef,
         item_key => ItemKey,
         meta => Meta,
         stored => false,
@@ -111,15 +111,15 @@ handle_call({mark_stored_raw, UploadKey, Info}, _From, State) ->
 
 handle_call({register_upload, UploadKey}, _From, State) ->
     Result = case ets:lookup(?TABLE, UploadKey) of
-        [{_, #{stored := true, library_id := LibId, item_key := ItemKey, meta := Meta,
+        [{_, #{stored := true, lib_ref := {LT, LI} = LibRef, item_key := ItemKey, meta := Meta,
                sha256 := Sha256}}] ->
             #{md5 := Md5, filename := Filename, filesize := Filesize,
               mtime := Mtime} = Meta,
             %% Use `any` — concurrent uploads must not fail with precondition
             %% errors. The gen_server serializes writes, so versions are
             %% monotonically increasing and responses stay ordered.
-            WriteResult = shurbej_version:write(LibId, any, fun(NewVersion) ->
-                case shurbej_db:get_file_meta(LibId, ItemKey) of
+            WriteResult = shurbej_version:write(LibRef, any, fun(NewVersion) ->
+                case shurbej_db:get_file_meta(LibRef, ItemKey) of
                     {ok, #shurbej_file_meta{sha256 = OldHash}} when OldHash =/= Sha256 ->
                         case shurbej_db:blob_unref(OldHash) of
                             {ok, 0} -> delete_blob_file(OldHash);
@@ -129,13 +129,13 @@ handle_call({register_upload, UploadKey}, _From, State) ->
                 end,
                 shurbej_db:blob_ref(Sha256),
                 shurbej_db:write_file_meta(#shurbej_file_meta{
-                    id = {LibId, ItemKey},
+                    id = {LT, LI, ItemKey},
                     md5 = Md5, sha256 = Sha256,
                     filename = Filename, filesize = Filesize,
                     mtime = Mtime
                 }),
                 %% Bump item version so incremental sync detects the file change
-                bump_item_version(LibId, ItemKey, NewVersion),
+                bump_item_version(LibRef, ItemKey, NewVersion),
                 ok
             end),
             ets:delete(?TABLE, UploadKey),
@@ -172,14 +172,14 @@ handle_info(_Msg, State) ->
 %% Confirm an existing file — bumps library + item version so concurrent
 %% exists responses are serialized with registrations through the version
 %% gen_server, keeping Last-Modified-Version monotonic for the client.
-confirm_existing(LibId, ItemKey) ->
-    shurbej_version:write(LibId, any, fun(NewVersion) ->
-        bump_item_version(LibId, ItemKey, NewVersion),
+confirm_existing(LibRef, ItemKey) ->
+    shurbej_version:write(LibRef, any, fun(NewVersion) ->
+        bump_item_version(LibRef, ItemKey, NewVersion),
         ok
     end).
 
-bump_item_version(LibId, ItemKey, NewVersion) ->
-    case shurbej_db:get_item(LibId, ItemKey) of
+bump_item_version(LibRef, ItemKey, NewVersion) ->
+    case shurbej_db:get_item(LibRef, ItemKey) of
         {ok, Item} ->
             shurbej_db:write_item(Item#shurbej_item{version = NewVersion});
         _ -> ok
