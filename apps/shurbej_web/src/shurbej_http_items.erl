@@ -372,15 +372,15 @@ generate_key() ->
 body_error(invalid_json) -> <<"Invalid JSON">>;
 body_error(body_too_large) -> <<"Request body too large">>.
 
-%% Cache children counts by {LibRef, LibVersion} — computed at most once per write.
+%% One cached {LibVersion, Counts} row per library in a public ETS table
+%% owned by shurbej_rate_limit. A version mismatch recomputes and overwrites.
+%% persistent_term would be wrong here — each write bumps LibVersion and
+%% `persistent_term:put` triggers a global scan across all terms.
 cached_children_counts(LibRef, LibVersion) ->
-    Key = {shurbej_children, LibRef, LibVersion},
-    case persistent_term:get(Key, undefined) of
-        undefined ->
+    case ets:lookup(shurbej_children_cache, LibRef) of
+        [{_, LibVersion, Counts}] -> Counts;
+        _ ->
             Counts = shurbej_db:count_item_children(LibRef),
-            catch persistent_term:erase({shurbej_children, LibRef, LibVersion - 1}),
-            persistent_term:put(Key, Counts),
-            Counts;
-        Counts ->
+            ets:insert(shurbej_children_cache, {LibRef, LibVersion, Counts}),
             Counts
     end.

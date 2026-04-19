@@ -48,6 +48,11 @@ backoff_secs(_, _, _, WindowSecs) ->
 
 init([]) ->
     ets:new(?TABLE, [named_table, public, set, {write_concurrency, true}]),
+    %% Children-count cache: one {LibRef, LibVersion, Counts} row per library;
+    %% reused across requests and invalidated by version mismatch.
+    ets:new(shurbej_children_cache,
+            [named_table, public, set, {read_concurrency, true},
+             {write_concurrency, true}]),
     erlang:send_after(?CLEANUP_INTERVAL, self(), cleanup),
     {ok, #{}}.
 
