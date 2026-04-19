@@ -28,8 +28,7 @@ handle_login(Req0, State) ->
                             shurbej_session:record_login_success(Username),
                             ApiKey = generate_api_key(),
                             shurbej_db:create_key(ApiKey, UserId,
-                                #{library => true, write => true,
-                                  files => true, notes => true}),
+                                shurbej_http_common:normalize_perms(undefined)),
                             Body = #{
                                 <<"apiKey">> => ApiKey,
                                 <<"userID">> => UserId,
