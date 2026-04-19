@@ -47,9 +47,9 @@ The web UI has a PDF viewer (pdf.js, multi-tab with LRU caching), customizable s
 
 ## What doesn't
 
-OAuth 1.0a, export formats (bibtex/RIS/CSL), `include` parameter, backoff header.
+OAuth 1.0a, export formats (bibtex/RIS/CSL), `include` parameter.
 
-Group libraries are supported server-side (`/groups/:id/...`, streaming, admin helpers), but the web UI has no group picker yet.
+Group libraries are fully supported: server routes at `/groups/:id/...`, streaming on `/groups/N` topics, per-group API-key permissions (`groups.all` or `groups.<id>`) composed with Zotero's `library_editing` / `library_reading` / `file_editing` settings, and a sidebar library switcher in the web UI.
 
 Publications (`/users/:id/publications/items`) are intentionally omitted.
 

@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import type { LibraryType } from "./library";
 
 export interface Tab {
   id: string;
@@ -6,6 +7,10 @@ export interface Tab {
   label: string;
   itemKey?: string;
   fetchUrl?: string;
+  /** Library the tab was opened from; PDFs need this so switching the sidebar
+   * library doesn't invalidate an already-open PDF's download URL. */
+  libraryType?: LibraryType;
+  libraryId?: number;
 }
 
 let nextId = 1;
@@ -16,14 +21,23 @@ const [tabs, setTabs] = createSignal<Tab[]>([
 
 const [activeTab, setActiveTab] = createSignal("library");
 
-export function openPdfTab(itemKey: string, title: string, fetchUrl: string) {
+export function openPdfTab(
+  itemKey: string,
+  title: string,
+  fetchUrl: string,
+  library?: { type: LibraryType; id: number },
+) {
   const existing = tabs().find((t) => t.type === "pdf" && t.itemKey === itemKey);
   if (existing) {
     setActiveTab(existing.id);
     return;
   }
   const id = `tab-${nextId++}`;
-  const tab: Tab = { id, type: "pdf", label: title, itemKey, fetchUrl };
+  const tab: Tab = {
+    id, type: "pdf", label: title, itemKey, fetchUrl,
+    libraryType: library?.type,
+    libraryId: library?.id,
+  };
   setTabs([...tabs(), tab]);
   setActiveTab(id);
 }

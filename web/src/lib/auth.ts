@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { clearLibraries } from "./library";
 
 const STORAGE_KEY = "shurbej_api_key";
 const USER_ID_KEY = "shurbej_user_id";
@@ -32,6 +33,7 @@ export function setUserId(id: number | null) {
 export function logout() {
   setApiKey(null);
   setUserId(null);
+  clearLibraries();
 }
 
 export { apiKey, userId };

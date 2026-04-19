@@ -4,7 +4,9 @@ import { getCollections, patchCollection, deleteCollection, type ZoteroCollectio
 import { getTags } from "../api/tags";
 import { createCachedResource } from "../lib/query-cache";
 import { selectedTags, toggleTag, clearTags, tagColors, setTagColor, removeTagColor } from "../lib/tags";
+import { selectedLibrary } from "../lib/library";
 import CreateCollectionModal from "./CreateCollectionModal";
+import LibrarySwitcher from "./LibrarySwitcher";
 
 const TAG_PALETTE = [
   "#e06c6c", "#e0a86c", "#d6d65e", "#6ce08c", "#6cc8e0",
@@ -238,12 +240,17 @@ function TagColorPicker(props: { tag: string; onClose: () => void }) {
 
 export default function Sidebar() {
   const loc = useLocation();
+  // Library-scoped cache keys so switching libraries refetches tree + tags.
+  const libTag = () => {
+    const lib = selectedLibrary();
+    return lib ? `${lib.type}:${lib.id}` : "user:0";
+  };
   const [collections, { refetch: refetchCollections, loading: collectionsLoading }] = createCachedResource(
-    () => "collections",
+    () => `collections:${libTag()}`,
     () => getCollections(),
   );
   const [tags, { loading: tagsLoading }] = createCachedResource(
-    () => "tags",
+    () => `tags:${libTag()}`,
     () => getTags(),
   );
   const [showNewCollection, setShowNewCollection] = createSignal(false);
@@ -291,6 +298,7 @@ export default function Sidebar() {
 
   return (
     <nav class="border-r border-border overflow-y-auto py-2 flex flex-col">
+      <LibrarySwitcher />
       <div class="px-3 space-y-0.5">
         <A
           href="/"

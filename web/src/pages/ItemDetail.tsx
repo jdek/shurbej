@@ -1,8 +1,9 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import { useParams, useNavigate, A } from "@solidjs/router";
 import { getItem, getChildren, deleteItem, patchItem, type ZoteroItem } from "../api/items";
-import { userPath } from "../api/client";
+import { libPath } from "../api/client";
 import { openPdfTab } from "../lib/tabs";
+import { currentLibrary } from "../lib/library";
 
 const API_BASE = import.meta.env.DEV ? "/api" : "";
 
@@ -48,13 +49,14 @@ export default function ItemDetail() {
   }
 
   function openPdf(child: ZoteroItem) {
-    const url = `${API_BASE}${userPath(`/items/${child.key}/file`)}`;
+    const url = `${API_BASE}${libPath(`/items/${child.key}/file`)}`;
     // Use parent item title if available, fall back to attachment title
     const parent = item();
     const title = (parent && parent.key !== child.key)
       ? (parent.data.title || parent.data.name || parent.key)
       : (child.data.title || child.data.name || child.key);
-    openPdfTab(child.key, title, url);
+    const lib = currentLibrary();
+    openPdfTab(child.key, title, url, { type: lib.type, id: lib.id });
   }
 
   const dataFields = () => {
@@ -68,7 +70,7 @@ export default function ItemDetail() {
   const fileUrl = () => {
     const it = item();
     if (!it) return null;
-    if (it.data.itemType === "attachment") return `${API_BASE}${userPath(`/items/${it.key}/file`)}`;
+    if (it.data.itemType === "attachment") return `${API_BASE}${libPath(`/items/${it.key}/file`)}`;
     return null;
   };
 

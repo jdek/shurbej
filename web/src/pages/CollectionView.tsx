@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import { useParams, useSearchParams } from "@solidjs/router";
-import { api, userPath } from "../api/client";
+import { api, libPath } from "../api/client";
 import { getCollection } from "../api/collections";
 import type { ZoteroItem } from "../api/items";
 import ItemTable from "../components/ItemTable";
@@ -33,7 +33,7 @@ export default function CollectionView() {
       const start = parseInt((searchParams.start as string) || "0", 10);
       const qs = `?limit=${PAGE_SIZE}&start=${start}&sort=${sort()}&direction=${direction()}`;
       const { data, headers } = await api<ZoteroItem[]>(
-        userPath(`/collections/${routeParams.key}/items/top${qs}`)
+        libPath(`/collections/${routeParams.key}/items/top${qs}`)
       );
       return {
         items: data,

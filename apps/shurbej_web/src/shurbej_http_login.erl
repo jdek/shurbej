@@ -69,7 +69,8 @@ handle_post(Req0, State) ->
                             case shurbej_db:authenticate_user(Username, Password) of
                                 {ok, UserId} ->
                                     ApiKey = generate_api_key(),
-                                    shurbej_db:create_key(ApiKey, UserId, #{library => true, write => true, files => true, notes => true}),
+                                    shurbej_db:create_key(ApiKey, UserId,
+                                        shurbej_http_common:normalize_perms(undefined)),
                                     UserInfo = #{user_id => UserId, username => Username, display_name => Username},
                                     ok = shurbej_session:complete(Token, ApiKey, UserInfo),
                                     Req = cowboy_req:reply(200,

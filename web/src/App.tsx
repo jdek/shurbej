@@ -1,7 +1,9 @@
-import { Show, Suspense, createMemo, lazy } from "solid-js";
+import { Show, Suspense, createMemo, createEffect, lazy } from "solid-js";
 import { Router, Route } from "@solidjs/router";
 import { apiKey, userId, logout } from "./lib/auth";
 import { tabs, activeTab, switchTab } from "./lib/tabs";
+import { setLibraries, libraries } from "./lib/library";
+import { getGroups } from "./api/groups";
 import Sidebar from "./components/Sidebar";
 import TabBar from "./components/TabBar";
 import Login from "./pages/Login";
@@ -62,6 +64,29 @@ function Shell(props: { children?: any }) {
 }
 
 function GuardedShell(props: { children?: any }) {
+  // Seed the libraries list (user + groups) once we know who we are.
+  createEffect(() => {
+    const uid = userId();
+    if (!apiKey() || uid == null) return;
+    if (libraries().length > 0) return;
+    (async () => {
+      let groups: { id: number; data: { name: string } }[] = [];
+      try {
+        groups = await getGroups();
+      } catch {
+        groups = [];
+      }
+      setLibraries([
+        { type: "user", id: uid, name: "My Library" },
+        ...groups.map((g) => ({
+          type: "group" as const,
+          id: g.id,
+          name: g.data.name,
+        })),
+      ]);
+    })();
+  });
+
   return (
     <Show when={apiKey() && userId()} fallback={<Login />}>
       <Shell>{props.children}</Shell>

@@ -6,6 +6,8 @@
     authenticate/1,
     authorize/1,
     check_perm/1,
+    check_lib_perm/2,
+    normalize_perms/1,
     lib_ref/1,
     lib_path_prefix/1,
     get_since/1,
@@ -121,9 +123,18 @@ authorize_path(UserId, Req) ->
         GroupIdBin ->
             case safe_int(GroupIdBin) of
                 {ok, GroupId} ->
-                    case shurbej_db:get_group_member(GroupId, UserId) of
-                        {ok, _} -> {ok, {group, GroupId}, Req};
-                        undefined -> {error, forbidden, Req}
+                    case shurbej_db:get_group(GroupId) of
+                        undefined ->
+                            {error, forbidden, Req};
+                        {ok, _} ->
+                            %% Stash caller's role (or `none` if not a member)
+                            %% so check_lib_perm/2 can decide without re-reading.
+                            Role = case shurbej_db:get_group_member(GroupId, UserId) of
+                                {ok, #shurbej_group_member{role = R}} -> R;
+                                undefined -> none
+                            end,
+                            put(shurbej_group_role, Role),
+                            {ok, {group, GroupId}, Req}
                     end;
                 error -> {error, bad_request, Req}
             end
@@ -151,24 +162,147 @@ lib_path_prefix({group, Id}) ->
 %% Permissions
 %% ===================================================================
 
-%% Normalize legacy permission formats to canonical form.
-normalize_perms(#{access := all}) ->
-    #{library => true, write => true, files => true, notes => true};
+%% Normalize a stored permission map to the canonical Zotero form:
+%%   #{user   => #{library, write, files, notes},
+%%     groups => #{all => #{library, write}}
+%%              | #{GroupId (int) => #{library, write}, all => ...}}.
+%%
+%% `undefined` (and other non-map inputs) yields full access — convenient for
+%% admin helpers that want an "all access" key without constructing the map.
 normalize_perms(Perms) when is_map(Perms) ->
     #{
-        library => maps:get(library, Perms, false),
-        write => maps:get(write, Perms, false),
-        files => maps:get(files, Perms, false),
-        notes => maps:get(notes, Perms, false)
+        user => normalize_user_bucket(maps:get(user, Perms, #{})),
+        groups => normalize_groups_bucket(maps:get(groups, Perms, #{}))
     };
 normalize_perms(_) ->
-    #{library => true, write => true, files => true, notes => true}.
+    all_access().
 
-%% Check a specific permission. Call after authorize/1.
+all_access() ->
+    #{
+        user => #{library => true, write => true, files => true, notes => true},
+        groups => #{all => #{library => true, write => true}}
+    }.
+
+normalize_user_bucket(M) when is_map(M) ->
+    #{library => truthy(maps:get(library, M, false)),
+      write   => truthy(maps:get(write, M, false)),
+      files   => truthy(maps:get(files, M, false)),
+      notes   => truthy(maps:get(notes, M, false))};
+normalize_user_bucket(_) ->
+    #{library => false, write => false, files => false, notes => false}.
+
+normalize_groups_bucket(M) when is_map(M) ->
+    maps:fold(fun(K, V, Acc) ->
+        NormK = normalize_group_key(K),
+        Acc#{NormK => #{
+            library => truthy(maps:get(library, V, false)),
+            write   => truthy(maps:get(write, V, false))
+        }}
+    end, #{}, M);
+normalize_groups_bucket(_) -> #{}.
+
+normalize_group_key(all) -> all;
+normalize_group_key(<<"all">>) -> all;
+normalize_group_key(N) when is_integer(N) -> N;
+normalize_group_key(B) when is_binary(B) ->
+    case safe_int(B) of
+        {ok, N} -> N;
+        error -> B
+    end;
+normalize_group_key(K) -> K.
+
+truthy(true) -> true;
+truthy(_) -> false.
+
+%% Check an unscoped permission (user bucket only). For library-scoped ops
+%% prefer check_lib_perm/2 which also honours group role + group policy.
 check_perm(Perm) ->
     case get(shurbej_perms) of
-        #{Perm := true} -> ok;
+        #{user := #{Perm := true}} -> ok;
         _ -> {error, forbidden}
+    end.
+
+%% Library-scoped permission check.
+%% Perm :: read | write | file_read | file_write.
+%%   read        — list/get metadata             (user.library / group library_reading)
+%%   write       — create/update/delete metadata (user.write   / group library_editing)
+%%   file_read   — download a file               (user.files   / group library_reading)
+%%   file_write  — upload/replace/delete a file  (user.files   / group file_editing)
+%%
+%% For user libraries, gates on the user bucket alone. For group libraries,
+%% combines the stored group-key grant with the group's own policy and the
+%% caller's role (cached from authorize/1).
+check_lib_perm(Perm, {user, _}) ->
+    UserKey = user_key_for(Perm),
+    case get(shurbej_perms) of
+        #{user := #{UserKey := true}} -> ok;
+        _ -> {error, forbidden}
+    end;
+check_lib_perm(Perm, {group, GroupId}) ->
+    case shurbej_db:get_group(GroupId) of
+        undefined -> {error, forbidden};
+        {ok, Group} ->
+            Role = case get(shurbej_group_role) of
+                undefined -> none;
+                R -> R
+            end,
+            case group_rule_allows(Perm, Group, Role)
+                 andalso group_key_allows(Perm, GroupId) of
+                true -> ok;
+                false -> {error, forbidden}
+            end
+    end.
+
+user_key_for(read) -> library;
+user_key_for(write) -> write;
+user_key_for(file_read) -> files;
+user_key_for(file_write) -> files.
+
+%% Group policy rule — does the group's own setting + caller's role allow this?
+%%   read / file_read → library_reading
+%%   write            → library_editing
+%%   file_write       → file_editing
+group_rule_allows(Perm, #shurbej_group{library_reading = all}, _Role)
+    when Perm =:= read; Perm =:= file_read -> true;
+group_rule_allows(Perm, _Group, none)
+    when Perm =:= read; Perm =:= file_read -> false;
+group_rule_allows(Perm, _Group, _Role)
+    when Perm =:= read; Perm =:= file_read -> true;
+group_rule_allows(write, #shurbej_group{library_editing = members}, Role)
+    when Role =/= none -> true;
+group_rule_allows(write, #shurbej_group{library_editing = admins}, Role)
+    when Role =:= owner; Role =:= admin -> true;
+group_rule_allows(write, _, _) -> false;
+group_rule_allows(file_write, #shurbej_group{file_editing = none}, _) -> false;
+group_rule_allows(file_write, #shurbej_group{file_editing = members}, Role)
+    when Role =/= none -> true;
+group_rule_allows(file_write, #shurbej_group{file_editing = admins}, Role)
+    when Role =:= owner; Role =:= admin -> true;
+group_rule_allows(file_write, _, _) -> false.
+
+%% Key-grant rule — does the API key carry the right per-group permission?
+%% Reads (including file_read) use the group-key `library` bit;
+%% writes (including file_write) use the group-key `write` bit.
+group_key_allows(Perm, GroupId) ->
+    KeyPerm = case Perm of
+        read -> library;
+        file_read -> library;
+        _ -> write
+    end,
+    case get(shurbej_perms) of
+        #{groups := Groups} when is_map(Groups) ->
+            has_group_grant(KeyPerm, GroupId, Groups);
+        _ -> false
+    end.
+
+has_group_grant(KeyPerm, GroupId, Groups) ->
+    case maps:get(GroupId, Groups, undefined) of
+        #{KeyPerm := true} -> true;
+        _ ->
+            case maps:get(all, Groups, undefined) of
+                #{KeyPerm := true} -> true;
+                _ -> false
+            end
     end.
 
 %% ===================================================================

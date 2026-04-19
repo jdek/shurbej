@@ -1,4 +1,4 @@
-import { api, userPath } from "./client";
+import { api, libPath } from "./client";
 
 export interface ZoteroTag {
   tag: string;
@@ -6,11 +6,11 @@ export interface ZoteroTag {
 }
 
 export async function getTags() {
-  const { data } = await api<ZoteroTag[]>(userPath("/tags"));
+  const { data } = await api<ZoteroTag[]>(libPath("/tags"));
   return data;
 }
 
 export async function deleteTags(tags: string[]) {
   const param = tags.map(encodeURIComponent).join("||");
-  await api(userPath(`/tags?tag=${param}`), { method: "DELETE" });
+  await api(libPath(`/tags?tag=${param}`), { method: "DELETE" });
 }

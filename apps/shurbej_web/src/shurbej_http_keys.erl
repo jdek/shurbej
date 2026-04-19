@@ -170,6 +170,8 @@ handle_delete_by_key(Req0, State) ->
 
 %% POST /keys — create API key with credentials (Zotero-compatible)
 %% Body: {"username": "...", "password": "...", "name": "...", "access": {...}}
+%% `access` is optional; shape matches `format_access/1` output. When omitted,
+%% the key gets full access on the user library + `groups.all` grants.
 handle_create_key(Req0, State) ->
     case shurbej_http_common:read_json_body(Req0) of
         {ok, #{<<"username">> := Username, <<"password">> := Password} = Body, Req1} ->
@@ -188,8 +190,8 @@ handle_create_key(Req0, State) ->
                         ok ->
                             case shurbej_db:authenticate_user(Username, Password) of
                                 {ok, UserId} ->
-                                    Perms = #{library => true, write => true,
-                                              files => true, notes => true},
+                                    Perms = parse_access_or_default(
+                                        maps:get(<<"access">>, Body, undefined)),
                                     ApiKey = generate_api_key(),
                                     shurbej_db:create_key(ApiKey, UserId, Perms),
                                     RespBody = #{
@@ -220,6 +222,45 @@ handle_create_key(Req0, State) ->
             {ok, Req, State}
     end.
 
+%% Parse the body's "access" field (Zotero shape with binary keys) into the
+%% canonical internal form. Missing or malformed → full access.
+parse_access_or_default(undefined) ->
+    shurbej_http_common:normalize_perms(undefined);
+parse_access_or_default(Access) when is_map(Access) ->
+    Parsed = #{
+        user => parse_user_access(maps:get(<<"user">>, Access, #{})),
+        groups => parse_groups_access(maps:get(<<"groups">>, Access, #{}))
+    },
+    shurbej_http_common:normalize_perms(Parsed);
+parse_access_or_default(_) ->
+    shurbej_http_common:normalize_perms(undefined).
+
+parse_user_access(U) when is_map(U) ->
+    #{
+        library => bin_truthy(<<"library">>, U),
+        write   => bin_truthy(<<"write">>, U),
+        files   => bin_truthy(<<"files">>, U),
+        notes   => bin_truthy(<<"notes">>, U)
+    };
+parse_user_access(_) ->
+    #{library => false, write => false, files => false, notes => false}.
+
+parse_groups_access(G) when is_map(G) ->
+    maps:fold(fun(K, V, Acc) when is_map(V) ->
+        Acc#{K => #{
+            library => bin_truthy(<<"library">>, V),
+            write   => bin_truthy(<<"write">>, V)
+        }};
+        (_, _, Acc) -> Acc
+    end, #{}, G);
+parse_groups_access(_) -> #{}.
+
+bin_truthy(K, M) ->
+    case maps:get(K, M, false) of
+        true -> true;
+        _ -> false
+    end.
+
 generate_api_key() ->
     Bytes = crypto:strong_rand_bytes(32),
     list_to_binary(lists:flatten(
@@ -230,22 +271,36 @@ method_not_allowed(Req0, State) ->
     Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),
     {ok, Req, State}.
 
-format_access(#{access := all}) ->
-    format_access(#{library => true, write => true, files => true, notes => true});
-format_access(Perms) when is_map(Perms) ->
+%% Render stored permissions in the Zotero-compatible response shape. Stored
+%% legacy flat forms (or `#{access := all}`) are upgraded first via
+%% normalize_perms, then rendered.
+format_access(Perms) ->
+    Canon = shurbej_http_common:normalize_perms(Perms),
     #{
-        <<"user">> => #{
-            <<"library">> => maps:get(library, Perms, false),
-            <<"files">> => maps:get(files, Perms, false),
-            <<"notes">> => maps:get(notes, Perms, false),
-            <<"write">> => maps:get(write, Perms, false)
-        },
-        <<"groups">> => #{
-            <<"all">> => #{
-                <<"library">> => maps:get(library, Perms, false),
-                <<"write">> => maps:get(write, Perms, false)
-            }
-        }
+        <<"user">> => format_user_bucket(maps:get(user, Canon, #{})),
+        <<"groups">> => format_groups_bucket(maps:get(groups, Canon, #{}))
+    }.
+
+format_user_bucket(U) when is_map(U) ->
+    #{
+        <<"library">> => maps:get(library, U, false),
+        <<"write">>   => maps:get(write, U, false),
+        <<"files">>   => maps:get(files, U, false),
+        <<"notes">>   => maps:get(notes, U, false)
     };
-format_access(_) ->
-    format_access(#{library => true, write => true, files => true, notes => true}).
+format_user_bucket(_) ->
+    #{<<"library">> => false, <<"write">> => false,
+      <<"files">> => false, <<"notes">> => false}.
+
+format_groups_bucket(G) when is_map(G) ->
+    maps:fold(fun(K, V, Acc) ->
+        Acc#{format_group_key(K) => #{
+            <<"library">> => maps:get(library, V, false),
+            <<"write">>   => maps:get(write, V, false)
+        }}
+    end, #{}, G);
+format_groups_bucket(_) -> #{}.
+
+format_group_key(all) -> <<"all">>;
+format_group_key(N) when is_integer(N) -> integer_to_binary(N);
+format_group_key(B) when is_binary(B) -> B.

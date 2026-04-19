@@ -4,6 +4,7 @@ import { getTopItems, type ListParams, type ZoteroItem } from "../api/items";
 import ItemTable from "../components/ItemTable";
 import CreateItemModal from "../components/CreateItemModal";
 import { selectedTags, clearTags, tagColors } from "../lib/tags";
+import { selectedLibrary } from "../lib/library";
 import { createCachedResource } from "../lib/query-cache";
 
 const PAGE_SIZE = 50;
@@ -17,6 +18,8 @@ export default function Library() {
   const direction = () => ((searchParams.direction as string) || "desc") as "asc" | "desc";
 
   const cacheKey = () => {
+    const lib = selectedLibrary();
+    const libTag = lib ? `${lib.type}:${lib.id}` : "user:0";
     const p: ListParams = {
       limit: PAGE_SIZE,
       start: parseInt((searchParams.start as string) || "0", 10),
@@ -25,13 +28,15 @@ export default function Library() {
       q: searchParams.q as string | undefined,
       tag: selectedTags().length === 1 ? selectedTags()[0] : undefined,
     };
-    return `items-top:${JSON.stringify(p)}`;
+    return `items-top:${libTag}:${JSON.stringify(p)}`;
   };
 
   const [result, { refetch, loading }] = createCachedResource(
     cacheKey,
     (key) => {
-      const p = JSON.parse(key.slice("items-top:".length));
+      // Key format: items-top:<libTag>:<json params>
+      const tail = key.slice(key.indexOf(":", "items-top:".length) + 1);
+      const p = JSON.parse(tail);
       return getTopItems(p);
     },
   );

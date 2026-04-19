@@ -5,6 +5,8 @@
 -export([
     %% Users
     create_user/2, create_user/3, list_users/0, delete_user/1,
+    %% API keys
+    create_api_key/2, create_api_key/3,
     %% Groups
     create_group/3, create_group/4, delete_group/1, list_groups/0,
     add_member/3, remove_member/2, list_members/1, list_user_groups/1
@@ -42,6 +44,46 @@ next_user_id() ->
         [] -> 1;
         Ids -> lists:max(Ids) + 1
     end.
+
+%% ===================================================================
+%% API keys
+%% ===================================================================
+
+%% Shortcut: create_api_key(UserId, Name) — full access to the user library
+%% and every group they belong to.
+create_api_key(UserId, Name) ->
+    create_api_key(UserId, Name, full).
+
+%% create_api_key(UserId, Name, Access) where Access is one of:
+%%   full            — library+write+files+notes on user, library+write on groups.all
+%%   read_only       — library only on user, library only on groups.all
+%%   Map             — canonical perms map; passes through normalize_perms.
+create_api_key(UserId, Name, Access) when is_integer(UserId), is_binary(Name) ->
+    case shurbej_db:get_user_by_id(UserId) of
+        undefined -> {error, user_not_found};
+        {ok, _} ->
+            Perms = resolve_access(Access),
+            ApiKey = generate_api_key(),
+            shurbej_db:create_key(ApiKey, UserId, Perms),
+            logger:notice("created API key '~s' for user_id=~p", [Name, UserId]),
+            {ok, ApiKey}
+    end.
+
+resolve_access(full) ->
+    shurbej_http_common:normalize_perms(undefined);
+resolve_access(read_only) ->
+    shurbej_http_common:normalize_perms(#{
+        user => #{library => true, write => false, files => false, notes => false},
+        groups => #{all => #{library => true, write => false}}
+    });
+resolve_access(Map) when is_map(Map) ->
+    shurbej_http_common:normalize_perms(Map).
+
+generate_api_key() ->
+    Bytes = crypto:strong_rand_bytes(32),
+    list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Bytes]
+    )).
 
 %% ===================================================================
 %% Groups

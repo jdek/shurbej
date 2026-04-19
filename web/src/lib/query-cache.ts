@@ -91,3 +91,10 @@ export function invalidatePrefix(prefix: string) {
 export function invalidate(key: string) {
   cache.delete(key);
 }
+
+/** Drop every cached entry. Call when the active library changes so that
+ * item / collection / tag resources refetch against the new library. */
+export function invalidateAll() {
+  cache.clear();
+  inflight.clear();
+}

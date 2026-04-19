@@ -1,4 +1,4 @@
-import { api, userPath } from "./client";
+import { api, libPath } from "./client";
 
 export interface ZoteroItem {
   key: string;
@@ -50,7 +50,7 @@ function qs(params: ListParams): string {
 
 export async function getItems(params: ListParams = {}) {
   const { data, headers } = await api<ZoteroItem[]>(
-    userPath(`/items${qs(params)}`)
+    libPath(`/items${qs(params)}`)
   );
   return {
     items: data,
@@ -61,7 +61,7 @@ export async function getItems(params: ListParams = {}) {
 
 export async function getTopItems(params: ListParams = {}) {
   const { data, headers } = await api<ZoteroItem[]>(
-    userPath(`/items/top${qs(params)}`)
+    libPath(`/items/top${qs(params)}`)
   );
   return {
     items: data,
@@ -71,18 +71,18 @@ export async function getTopItems(params: ListParams = {}) {
 }
 
 export async function getItem(key: string) {
-  const { data } = await api<ZoteroItem>(userPath(`/items/${key}`));
+  const { data } = await api<ZoteroItem>(libPath(`/items/${key}`));
   return data;
 }
 
 export async function getChildren(key: string) {
-  const { data } = await api<ZoteroItem[]>(userPath(`/items/${key}/children`));
+  const { data } = await api<ZoteroItem[]>(libPath(`/items/${key}/children`));
   return data;
 }
 
 export async function getTrashItems(params: ListParams = {}) {
   const { data, headers } = await api<ZoteroItem[]>(
-    userPath(`/items/trash${qs(params)}`)
+    libPath(`/items/trash${qs(params)}`)
   );
   return {
     items: data,
@@ -92,7 +92,7 @@ export async function getTrashItems(params: ListParams = {}) {
 }
 
 export async function createItems(items: Record<string, unknown>[]) {
-  const { data } = await api(userPath("/items"), {
+  const { data } = await api(libPath("/items"), {
     method: "POST",
     body: JSON.stringify(items),
   });
@@ -100,7 +100,7 @@ export async function createItems(items: Record<string, unknown>[]) {
 }
 
 export async function patchItem(key: string, patch: Record<string, unknown>, version: number) {
-  const { data } = await api<ZoteroItem>(userPath(`/items/${key}`), {
+  const { data } = await api<ZoteroItem>(libPath(`/items/${key}`), {
     method: "PATCH",
     body: JSON.stringify(patch),
     version,
@@ -109,7 +109,7 @@ export async function patchItem(key: string, patch: Record<string, unknown>, ver
 }
 
 export async function deleteItem(key: string, version: number) {
-  await api(userPath(`/items/${key}`), {
+  await api(libPath(`/items/${key}`), {
     method: "DELETE",
     version,
   });

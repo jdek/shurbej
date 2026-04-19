@@ -271,7 +271,17 @@
     stream_topic_updated/1,
     stream_bad_key/1,
     stream_bad_message/1,
-    stream_delete_subscription/1
+    stream_delete_subscription/1,
+
+    %% Coverage: group permissions
+    group_owner_writes_admin_only/1,
+    group_member_blocked_admin_only/1,
+    group_member_writes_members_editing/1,
+    group_nonmember_blocked_private_read/1,
+    group_nonmember_reads_public/1,
+    group_file_editing_none_blocks_upload/1,
+    key_without_group_grant_blocks/1,
+    key_with_groups_all_works/1
 ]).
 
 all() ->
@@ -433,7 +443,15 @@ all() ->
         stream_topic_updated,
         stream_bad_key,
         stream_bad_message,
-        stream_delete_subscription
+        stream_delete_subscription,
+        group_owner_writes_admin_only,
+        group_member_blocked_admin_only,
+        group_member_writes_members_editing,
+        group_nonmember_blocked_private_read,
+        group_nonmember_reads_public,
+        group_file_editing_none_blocks_upload,
+        key_without_group_grant_blocks,
+        key_with_groups_all_works
     ].
 
 init_per_suite(Config) ->
@@ -449,7 +467,7 @@ init_per_suite(Config) ->
     ApiKey = crypto:strong_rand_bytes(12),
     ApiKeyHex = list_to_binary(lists:flatten(
         [io_lib:format("~2.16.0b", [B]) || <<B>> <= ApiKey])),
-    shurbej_db:create_key(ApiKeyHex, 1, #{library => true, write => true, files => true, notes => true}),
+    shurbej_db:create_key(ApiKeyHex, 1, shurbej_http_common:normalize_perms(undefined)),
     [{api_key, ApiKeyHex}, {mnesia_dir, MnesiaDir}, {base, "http://localhost:18080"} | Config].
 
 end_per_suite(Config) ->
@@ -1223,7 +1241,7 @@ delete_key_revokes(Config) ->
     %% Create a temporary key
     TmpKey = list_to_binary(lists:flatten(
         [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:strong_rand_bytes(12)])),
-    shurbej_db:create_key(TmpKey, 1, #{library => true, write => true, files => true, notes => true}),
+    shurbej_db:create_key(TmpKey, 1, shurbej_http_common:normalize_perms(undefined)),
     %% Verify it works
     {ok, {{_, 200, _}, _, _}} =
         httpc:request(get, {Base ++ "/keys/current",
@@ -2620,6 +2638,164 @@ stream_delete_subscription(Config) ->
     end,
     gun:close(Pid),
     ok.
+
+%% ===================================================================
+%% Group permissions
+%% ===================================================================
+
+group_owner_writes_admin_only(Config) ->
+    {GroupId, _OwnerId, OwnerKey} = mk_group(#{
+        library_editing => admins, library_reading => members, file_editing => admins
+    }),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Owner wrote">>},
+    {Status, _} = request_with_key(post, Path, [],
+        simdjson:encode([Item]), Config, OwnerKey),
+    ?assertEqual(200, Status),
+    ok.
+
+group_member_blocked_admin_only(Config) ->
+    {GroupId, _OwnerId, _OwnerKey} = mk_group(#{
+        library_editing => admins, library_reading => members, file_editing => admins
+    }),
+    {MemberId, MemberKey} = mk_user(full),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Member wrote">>},
+    {Status, _} = request_with_key(post, Path, [],
+        simdjson:encode([Item]), Config, MemberKey),
+    ?assertEqual(403, Status),
+    ok.
+
+group_member_writes_members_editing(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    {MemberId, MemberKey} = mk_user(full),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Member OK">>},
+    {Status, _} = request_with_key(post, Path, [],
+        simdjson:encode([Item]), Config, MemberKey),
+    ?assertEqual(200, Status),
+    ok.
+
+group_nonmember_blocked_private_read(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    {_Uid, NMKey} = mk_user(full),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
+    ?assertEqual(403, Status),
+    ok.
+
+group_nonmember_reads_public(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => admins, library_reading => all, file_editing => admins
+    }),
+    {_Uid, NMKey} = mk_user(full),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
+    ?assertEqual(200, Status),
+    ok.
+
+group_file_editing_none_blocks_upload(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => none
+    }),
+    {MemberId, MemberKey} = mk_user(full),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items/ZZZZZZZZ/file",
+    Md5 = <<"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">>,
+    Form = "upload=1&md5=" ++ binary_to_list(Md5) ++
+           "&filename=x.txt&filesize=1&mtime=1",
+    {Status, _} = post_form_with_key(Path, Form,
+        [{"If-None-Match", "*"}], Config, MemberKey),
+    ?assertEqual(403, Status),
+    ok.
+
+key_without_group_grant_blocks(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    %% Key with no groups bucket at all — should be rejected even for members.
+    {MemberId, MemberKey} = mk_user(#{
+        user => #{library => true, write => true, files => false, notes => false},
+        groups => #{}
+    }),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, MemberKey),
+    ?assertEqual(403, Status),
+    ok.
+
+key_with_groups_all_works(Config) ->
+    {GroupId, _, _} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    {MemberId, MemberKey} = mk_user(#{
+        user => #{library => true, write => true, files => true, notes => true},
+        groups => #{all => #{library => true, write => true}}
+    }),
+    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, MemberKey),
+    ?assertEqual(200, Status),
+    ok.
+
+%% ===================================================================
+%% Group-perm test helpers
+%% ===================================================================
+
+mk_user(Access) ->
+    Uniq = integer_to_binary(erlang:unique_integer([positive])),
+    Name = <<"u_", Uniq/binary>>,
+    ok = shurbej_admin:create_user(Name, <<"pw">>),
+    UserId = case [I || {N, I} <- shurbej_admin:list_users(), N =:= Name] of
+        [Id] -> Id
+    end,
+    {ok, Key} = shurbej_admin:create_api_key(UserId, Name, Access),
+    {UserId, Key}.
+
+mk_group(Opts) ->
+    Uniq = integer_to_binary(erlang:unique_integer([positive])),
+    {OwnerId, OwnerKey} = mk_user(full),
+    {ok, GroupId} = shurbej_admin:create_group(
+        <<"g_", Uniq/binary>>, OwnerId, private, Opts),
+    {GroupId, OwnerId, OwnerKey}.
+
+request_with_key(Method, Path, ExtraHeaders, ReqBody, Config, ApiKey) ->
+    Base = ?config(base, Config),
+    Url = Base ++ Path,
+    AllHeaders = [{"Zotero-API-Key", binary_to_list(ApiKey)} | ExtraHeaders],
+    Response = case Method of
+        get -> httpc:request(get, {Url, AllHeaders}, [], [{body_format, binary}]);
+        delete -> httpc:request(delete, {Url, AllHeaders}, [], [{body_format, binary}]);
+        _ ->
+            httpc:request(Method, {Url, AllHeaders, "application/json", ReqBody},
+                          [], [{body_format, binary}])
+    end,
+    {ok, {{_, Status, _}, _, RespBody}} = Response,
+    Decoded = case RespBody of
+        <<>> -> #{};
+        _ -> try simdjson:decode(RespBody) catch _:_ -> RespBody end
+    end,
+    {Status, Decoded}.
+
+post_form_with_key(Path, FormBody, ExtraHeaders, Config, ApiKey) ->
+    Base = ?config(base, Config),
+    Url = Base ++ Path,
+    AllHeaders = [{"Zotero-API-Key", binary_to_list(ApiKey)} | ExtraHeaders],
+    {ok, {{_, Status, _}, _, RespBody}} =
+        httpc:request(post, {Url, AllHeaders,
+                             "application/x-www-form-urlencoded", FormBody},
+                      [], [{body_format, binary}]),
+    Decoded = case RespBody of
+        <<>> -> #{};
+        _ -> try simdjson:decode(RespBody) catch _:_ -> RespBody end
+    end,
+    {Status, Decoded}.
 
 %% ===================================================================
 %% HTTP helpers

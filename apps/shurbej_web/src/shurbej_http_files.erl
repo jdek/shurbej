@@ -5,8 +5,16 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibRef, _} ->
-            case shurbej_http_common:check_perm(files) of
+        {ok, LibRef, _} ->
+            Method = cowboy_req:method(Req0),
+            Perm = case Method of
+                <<"POST">> -> file_write;
+                <<"PUT">> -> file_write;
+                <<"DELETE">> -> file_write;
+                <<"PATCH">> -> file_write;
+                _ -> file_read
+            end,
+            case shurbej_http_common:check_lib_perm(Perm, LibRef) of
                 {error, forbidden} ->
                     Req = shurbej_http_common:error_response(403, <<"File access denied">>, Req0),
                     {ok, Req, State};
@@ -14,7 +22,7 @@ init(Req0, State) ->
                     case maps:get(action, State, default) of
                         view -> handle_view(Req0, State);
                         view_url -> handle_view_url(Req0, State);
-                        default -> handle(cowboy_req:method(Req0), Req0, State)
+                        default -> handle(Method, Req0, State)
                     end
             end;
         {error, Reason, _} ->

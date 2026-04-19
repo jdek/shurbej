@@ -1,4 +1,5 @@
 import { apiKey, userId } from "../lib/auth";
+import { currentLibrary } from "../lib/library";
 
 // In dev, Vite proxies /api/* → backend. In prod, same origin serves both.
 const BASE = import.meta.env.DEV ? "/api" : "";
@@ -39,7 +40,17 @@ export async function api<T = unknown>(
   return { data: data as T, headers: res.headers };
 }
 
+/** Path scoped to the authenticated user — use for endpoints that are always
+ * user-scoped regardless of the active library (e.g. /users/:id/groups). */
 export function userPath(path: string) {
   const uid = userId();
   return `/users/${uid}${path}`;
+}
+
+/** Path scoped to the currently-selected library. Emits `/users/:id...` or
+ * `/groups/:id...` based on the library switcher. */
+export function libPath(path: string) {
+  const lib = currentLibrary();
+  const prefix = lib.type === "user" ? "/users" : "/groups";
+  return `${prefix}/${lib.id}${path}`;
 }

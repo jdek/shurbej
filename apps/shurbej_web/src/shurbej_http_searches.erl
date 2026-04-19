@@ -5,13 +5,14 @@
 
 init(Req0, State) ->
     case shurbej_http_common:authorize(Req0) of
-        {ok, _LibRef, _} ->
+        {ok, LibRef, _} ->
             Method = cowboy_req:method(Req0),
-            case needs_write(Method) andalso shurbej_http_common:check_perm(write) of
+            Perm = perm_for_method(Method),
+            case shurbej_http_common:check_lib_perm(Perm, LibRef) of
                 {error, forbidden} ->
-                    Req = shurbej_http_common:error_response(403, <<"Write access denied">>, Req0),
+                    Req = shurbej_http_common:error_response(403, <<"Access denied">>, Req0),
                     {ok, Req, State};
-                _ ->
+                ok ->
                     handle(Method, Req0, State)
             end;
         {error, Reason, _} ->
@@ -19,11 +20,9 @@ init(Req0, State) ->
             {ok, Req, State}
     end.
 
-needs_write(<<"POST">>) -> true;
-needs_write(<<"PUT">>) -> true;
-needs_write(<<"PATCH">>) -> true;
-needs_write(<<"DELETE">>) -> true;
-needs_write(_) -> false.
+perm_for_method(<<"GET">>) -> read;
+perm_for_method(<<"HEAD">>) -> read;
+perm_for_method(_) -> write.
 
 handle(<<"GET">>, Req0, State) ->
     LibRef = shurbej_http_common:lib_ref(Req0),

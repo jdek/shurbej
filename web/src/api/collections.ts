@@ -1,4 +1,4 @@
-import { api, userPath } from "./client";
+import { api, libPath } from "./client";
 
 export interface ZoteroCollection {
   key: string;
@@ -14,17 +14,17 @@ export interface ZoteroCollection {
 }
 
 export async function getCollections() {
-  const { data } = await api<ZoteroCollection[]>(userPath("/collections"));
+  const { data } = await api<ZoteroCollection[]>(libPath("/collections"));
   return data;
 }
 
 export async function getCollection(key: string) {
-  const { data } = await api<ZoteroCollection>(userPath(`/collections/${key}`));
+  const { data } = await api<ZoteroCollection>(libPath(`/collections/${key}`));
   return data;
 }
 
 export async function createCollections(collections: { name: string; parentCollection?: string }[]) {
-  const { data } = await api(userPath("/collections"), {
+  const { data } = await api(libPath("/collections"), {
     method: "POST",
     body: JSON.stringify(collections),
   });
@@ -32,7 +32,7 @@ export async function createCollections(collections: { name: string; parentColle
 }
 
 export async function patchCollection(key: string, patch: Record<string, unknown>, version: number) {
-  const { data } = await api<ZoteroCollection>(userPath(`/collections/${key}`), {
+  const { data } = await api<ZoteroCollection>(libPath(`/collections/${key}`), {
     method: "PATCH",
     body: JSON.stringify(patch),
     version,
@@ -41,7 +41,7 @@ export async function patchCollection(key: string, patch: Record<string, unknown
 }
 
 export async function deleteCollection(key: string, version: number) {
-  await api(userPath(`/collections/${key}`), {
+  await api(libPath(`/collections/${key}`), {
     method: "DELETE",
     version,
   });

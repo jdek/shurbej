@@ -5,7 +5,14 @@ init(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"GET">> ->
             case shurbej_http_common:authorize(Req0) of
-                {ok, _LibRef, _} -> handle_get(Req0, State);
+                {ok, LibRef, _} ->
+                    case shurbej_http_common:check_lib_perm(read, LibRef) of
+                        ok -> handle_get(Req0, State);
+                        {error, forbidden} ->
+                            Req = shurbej_http_common:error_response(403,
+                                <<"Access denied">>, Req0),
+                            {ok, Req, State}
+                    end;
                 {error, Reason, _} ->
                     Req = shurbej_http_common:auth_error_response(Reason, Req0),
                     {ok, Req, State}

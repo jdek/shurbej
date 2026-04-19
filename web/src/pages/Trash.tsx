@@ -2,6 +2,7 @@ import { createResource, Show } from "solid-js";
 import { useSearchParams } from "@solidjs/router";
 import { getTrashItems } from "../api/items";
 import ItemTable from "../components/ItemTable";
+import { selectedLibrary } from "../lib/library";
 
 const PAGE_SIZE = 50;
 
@@ -11,14 +12,19 @@ export default function Trash() {
   const sort = () => (searchParams.sort as string) || "dateModified";
   const direction = () => ((searchParams.direction as string) || "desc") as "asc" | "desc";
 
-  const params = () => ({
-    limit: PAGE_SIZE,
-    start: parseInt((searchParams.start as string) || "0", 10),
-    sort: sort(),
-    direction: direction(),
-  });
+  const params = () => {
+    // Include lib ref so createResource refetches when the library switches.
+    const lib = selectedLibrary();
+    return {
+      limit: PAGE_SIZE,
+      start: parseInt((searchParams.start as string) || "0", 10),
+      sort: sort(),
+      direction: direction(),
+      _lib: lib ? `${lib.type}:${lib.id}` : undefined,
+    };
+  };
 
-  const [result] = createResource(params, getTrashItems);
+  const [result] = createResource(params, ({ _lib: _, ...rest }) => getTrashItems(rest));
 
   function handleSort(field: string, dir: "asc" | "desc") {
     setSearchParams({ sort: field, direction: dir, start: undefined });
