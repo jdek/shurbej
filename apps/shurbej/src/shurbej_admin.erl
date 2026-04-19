@@ -80,10 +80,7 @@ resolve_access(Map) when is_map(Map) ->
     shurbej_http_common:normalize_perms(Map).
 
 generate_api_key() ->
-    Bytes = crypto:strong_rand_bytes(32),
-    list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Bytes]
-    )).
+    binary:encode_hex(crypto:strong_rand_bytes(32), lowercase).
 
 %% ===================================================================
 %% Groups

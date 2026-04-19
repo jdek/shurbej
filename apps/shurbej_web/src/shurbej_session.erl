@@ -221,10 +221,7 @@ do_notify(Token, Event) ->
     ets:delete(?SUBSCRIBERS, Token).
 
 generate_token() ->
-    Bytes = crypto:strong_rand_bytes(24),
-    list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Bytes]
-    )).
+    binary:encode_hex(crypto:strong_rand_bytes(24), lowercase).
 
 to_binary(B) when is_binary(B) -> B;
 to_binary(L) when is_list(L) -> list_to_binary(L).

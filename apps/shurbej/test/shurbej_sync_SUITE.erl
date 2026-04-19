@@ -527,8 +527,7 @@ init_per_suite(Config) ->
     %% Create a test user and API key
     ok = shurbej_admin:create_user(<<"testuser">>, <<"testpass">>, 1),
     ApiKey = crypto:strong_rand_bytes(12),
-    ApiKeyHex = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= ApiKey])),
+    ApiKeyHex = hex_bytes(ApiKey),
     shurbej_db:create_key(ApiKeyHex, 1, shurbej_http_common:normalize_perms(undefined)),
     [{api_key, ApiKeyHex}, {mnesia_dir, MnesiaDir}, {base, "http://localhost:18080"} | Config].
 
@@ -999,8 +998,7 @@ file_upload_download(Config) ->
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
     %% Step 1: Request upload authorization
     FileData = <<"fake pdf content for testing">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     UploadParams = cow_qs:qs([
         {<<"upload">>, <<"1">>},
         {<<"md5">>, Md5},
@@ -1024,8 +1022,7 @@ file_upload_download(Config) ->
     ?assertEqual(FileData, DlBody),
     ?assertEqual(Md5, maps:get(<<"etag">>, DlHeaders)),
     %% Verify blob exists at content-addressed path (SHA-256)
-    Sha256 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    Sha256 = hex_sha256(FileData),
     BlobFile = shurbej_files:blob_path(Sha256),
     ?assert(filelib:is_regular(BlobFile)),
     ok.
@@ -1033,8 +1030,7 @@ file_upload_download(Config) ->
 file_content_addressed_dedup(Config) ->
     %% Upload the same content to two different items
     FileData = <<"shared content across items">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     %% Create two items
     Items = [
         #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"file_a.pdf">>},
@@ -1077,8 +1073,7 @@ file_content_addressed_dedup(Config) ->
     ?assertEqual(FileData, DlA),
     ?assertEqual(FileData, DlB),
     %% Only one blob file on disk — addressed by SHA-256
-    Sha256 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    Sha256 = hex_sha256(FileData),
     BlobFile = shurbej_files:blob_path(Sha256),
     ?assert(filelib:is_regular(BlobFile)),
     %% Refcount should be 2
@@ -1088,8 +1083,7 @@ file_content_addressed_dedup(Config) ->
 file_refcount_cleanup(Config) ->
     %% Create an item, upload a file, then verify unref works
     FileData = <<"unique content for refcount test">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"refcount.pdf">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
@@ -1108,8 +1102,7 @@ file_refcount_cleanup(Config) ->
     Reg = cow_qs:qs([{<<"uploadKey">>, UploadKey}]),
     {204, _, _} = post_form("/users/1/items/" ++ binary_to_list(Key) ++ "/file", Reg, Config),
     %% Blob should exist with refcount 1 (keyed by SHA-256)
-    Sha256 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    Sha256 = hex_sha256(FileData),
     BlobFile = shurbej_files:blob_path(Sha256),
     ?assert(filelib:is_regular(BlobFile)),
     [{shurbej_blob, Sha256, _, 1}] = mnesia:dirty_read(shurbej_blob, Sha256),
@@ -1215,6 +1208,12 @@ file_concurrent_upload_versions(Config) ->
 hex_md5(Data) ->
     binary:encode_hex(crypto:hash(md5, Data), lowercase).
 
+hex_sha256(Data) ->
+    binary:encode_hex(crypto:hash(sha256, Data), lowercase).
+
+hex_bytes(Bytes) when is_binary(Bytes) ->
+    binary:encode_hex(Bytes, lowercase).
+
 %% ===================================================================
 %% Auth flow
 %% ===================================================================
@@ -1301,8 +1300,7 @@ session_expired(_Config) ->
 delete_key_revokes(Config) ->
     Base = ?config(base, Config),
     %% Create a temporary key
-    TmpKey = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:strong_rand_bytes(12)])),
+    TmpKey = hex_bytes(crypto:strong_rand_bytes(12)),
     shurbej_db:create_key(TmpKey, 1, shurbej_http_common:normalize_perms(undefined)),
     %% Verify it works
     {ok, {{_, 200, _}, _, _}} =
@@ -1954,8 +1952,7 @@ file_cascade_delete(Config) ->
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
     %% Upload a file
     FileData = <<"cascade delete test data">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     UploadParams = cow_qs:qs([
         {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
         {<<"filename">>, <<"cascade.bin">>},
@@ -2306,8 +2303,7 @@ file_view(Config) ->
         Items))),
     %% Upload
     FileData = <<"Hello view test">>,
-    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
-        || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
         "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=view_test.txt&filesize=15&mtime=1000",
         [{"If-None-Match", "*"}], Config),
@@ -2396,8 +2392,7 @@ file_upload_zip(Config) ->
         Items))),
     %% Create a ZIP-compressed file (like Zotero does)
     FileData = <<"fake pdf content for testing zip upload">>,
-    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
-        || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
         "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=zip_test.pdf&filesize=" ++
         integer_to_list(byte_size(FileData)) ++ "&mtime=2000",
@@ -2521,8 +2516,7 @@ upload_multipart(Config) ->
         fun(I) -> maps:get(<<"title">>, maps:get(<<"data">>, I)) =:= <<"multipart_test.txt">> end,
         Items))),
     FileData = <<"multipart upload test content">>,
-    Md5 = list_to_binary(lists:flatten([io_lib:format("~2.16.0b", [B])
-        || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     {200, _, UpResp} = post_form("/users/1/items/" ++ binary_to_list(AttKey) ++ "/file",
         "upload=1&md5=" ++ binary_to_list(Md5) ++ "&filename=multipart_test.txt&filesize=" ++
         integer_to_list(byte_size(FileData)) ++ "&mtime=3000",
@@ -3019,8 +3013,7 @@ files_upload_precondition_failed(Config) ->
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
     FileData = <<"pf-content">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     Form = cow_qs:qs([
         {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
         {<<"filename">>, <<"pf.pdf">>},
@@ -3035,8 +3028,7 @@ files_upload_precondition_failed(Config) ->
     {204, _, _} = post_form(Path, cow_qs:qs([{<<"uploadKey">>, UploadKey}]), Config),
     %% Now a second If-None-Match:* for the same item must 412 (file exists).
     NewData = <<"different">>,
-    NewMd5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, NewData)])),
+    NewMd5 = hex_md5(NewData),
     Form2 = cow_qs:qs([
         {<<"upload">>, <<"1">>}, {<<"md5">>, NewMd5},
         {<<"filename">>, <<"pf.pdf">>},
@@ -3133,8 +3125,7 @@ item_delete_cascade_unlinks_blob(Config) ->
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
     FileData = <<"unique-blob-content-", (integer_to_binary(
         erlang:unique_integer([positive])))/binary>>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     Form = cow_qs:qs([
         {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
         {<<"filename">>, <<"u.pdf">>},
@@ -3146,8 +3137,7 @@ item_delete_cascade_unlinks_blob(Config) ->
     {201, _, _} = post_raw(binary_to_list(maps:get(<<"url">>, Auth)), FileData),
     {204, _, _} = post_form(Path,
         cow_qs:qs([{<<"uploadKey">>, maps:get(<<"uploadKey">>, Auth)}]), Config),
-    Sha256 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    Sha256 = hex_sha256(FileData),
     BlobFile = shurbej_files:blob_path(Sha256),
     ?assert(filelib:is_regular(BlobFile)),
     %% Delete the item — cascade should unlink the blob post-commit.
@@ -3207,8 +3197,7 @@ admin_delete_group_cascades(Config) ->
                                  Config, OwnerKey),
     #{<<"0">> := #{<<"key">> := ItemKey}} = maps:get(<<"successful">>, CB),
     FileData = <<"cascade-me">>,
-    Md5 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Md5 = hex_md5(FileData),
     FilePath = ItemsPath ++ "/" ++ binary_to_list(ItemKey) ++ "/file",
     Form = cow_qs:qs([
         {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
@@ -3226,8 +3215,7 @@ admin_delete_group_cascades(Config) ->
     %% Confirm rows exist and the blob file is on disk.
     ?assertMatch({ok, _}, shurbej_db:get_item({group, GroupId}, ItemKey)),
     ?assertMatch({ok, _}, shurbej_db:get_file_meta({group, GroupId}, ItemKey)),
-    Sha256 = list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    Sha256 = hex_sha256(FileData),
     BlobFile = shurbej_files:blob_path(Sha256),
     ?assert(filelib:is_regular(BlobFile)),
     %% Delete and re-check: rows, blob row, AND the file on disk are gone.

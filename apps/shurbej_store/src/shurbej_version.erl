@@ -95,14 +95,19 @@ topic({group, Id}) ->
     <<"/groups/", (integer_to_binary(Id))/binary>>.
 
 call(LibRef, Msg) ->
-    case global:whereis_name({?MODULE, LibRef}) of
-        undefined ->
-            case shurbej_version_sup:start_child(LibRef) of
-                {ok, Pid} ->
-                    gen_server:call(Pid, Msg);
-                {error, {already_started, Pid}} ->
-                    gen_server:call(Pid, Msg)
-            end;
-        Pid ->
-            gen_server:call(Pid, Msg)
+    %% The version server is lazy-started per library. `ensure_started` is
+    %% race-free — start_child returns {already_started, Pid} if another
+    %% caller beat us to it — and we also tolerate the server dying
+    %% between resolve and call (e.g. during a group wipe) by retrying
+    %% once. A single retry is enough because ensure_started will always
+    %% spawn a fresh worker on the second attempt.
+    try gen_server:call(ensure_started(LibRef), Msg)
+    catch exit:{noproc, _} ->
+        gen_server:call(ensure_started(LibRef), Msg)
+    end.
+
+ensure_started(LibRef) ->
+    case shurbej_version_sup:start_child(LibRef) of
+        {ok, Pid} -> Pid;
+        {error, {already_started, Pid}} -> Pid
     end.

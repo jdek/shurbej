@@ -286,10 +286,7 @@ bin_truthy(K, M) ->
     end.
 
 generate_api_key() ->
-    Bytes = crypto:strong_rand_bytes(32),
-    list_to_binary(lists:flatten(
-        [io_lib:format("~2.16.0b", [B]) || <<B>> <= Bytes]
-    )).
+    binary:encode_hex(crypto:strong_rand_bytes(32), lowercase).
 
 method_not_allowed(Req0, State) ->
     Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),

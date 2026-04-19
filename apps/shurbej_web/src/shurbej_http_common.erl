@@ -48,6 +48,7 @@
     envelope_item/3,
     envelope_collection/2,
     envelope_search/2,
+    envelope_group/1,
     auth_error_response/2,
     maybe_backoff/1
 ]).
@@ -693,6 +694,54 @@ envelope_search(LibRef, #shurbej_search{id = {_, _, Key}, version = Version, dat
         <<"meta">> => #{},
         <<"data">> => Data#{<<"key">> => Key, <<"version">> => Version}
     }.
+
+%% Shared Zotero-compatible envelope for a group record. Used both by the
+%% single-group endpoint (/groups/:id) and the per-user group listing
+%% (/users/:id/groups); keeping them unified means the shape can't drift.
+envelope_group(#shurbej_group{
+        group_id = Id, name = Name, owner_id = Owner, type = Type,
+        description = Desc, url = Url, has_image = HasImage,
+        library_editing = LibEd, library_reading = LibRd, file_editing = FileEd,
+        version = Version}) ->
+    Base = base_url(),
+    IdBin = integer_to_binary(Id),
+    GroupUrl = <<Base/binary, "/groups/", IdBin/binary>>,
+    #{
+        <<"id">> => Id,
+        <<"version">> => Version,
+        <<"links">> => #{
+            <<"self">> => #{
+                <<"href">> => GroupUrl,
+                <<"type">> => <<"application/json">>
+            },
+            <<"alternate">> => #{
+                <<"href">> => GroupUrl,
+                <<"type">> => <<"text/html">>
+            }
+        },
+        <<"meta">> => #{
+            <<"created">> => <<>>,
+            <<"lastModified">> => <<>>,
+            <<"numItems">> => 0
+        },
+        <<"data">> => #{
+            <<"id">> => Id,
+            <<"version">> => Version,
+            <<"name">> => Name,
+            <<"owner">> => Owner,
+            <<"type">> => group_type_to_binary(Type),
+            <<"description">> => Desc,
+            <<"url">> => Url,
+            <<"hasImage">> => HasImage,
+            <<"libraryEditing">> => atom_to_binary(LibEd),
+            <<"libraryReading">> => atom_to_binary(LibRd),
+            <<"fileEditing">> => atom_to_binary(FileEd)
+        }
+    }.
+
+group_type_to_binary(private) -> <<"Private">>;
+group_type_to_binary(public_closed) -> <<"PublicClosed">>;
+group_type_to_binary(public_open) -> <<"PublicOpen">>.
 
 maybe_decompress(Body, Req) ->
     case cowboy_req:header(<<"content-encoding">>, Req) of

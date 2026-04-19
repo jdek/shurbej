@@ -593,34 +593,14 @@ delete_group(GroupId) ->
 
 %% Delete every row belonging to the given library from every per-library
 %% table, releasing blob references as we go. Must be called inside a
-%% Mnesia transaction.
+%% Mnesia transaction. Tables listed here must have their primary key
+%% start with {LibType, LibId, ...} — we only guard on those first two
+%% elements so the match spec is uniform.
 cascade_delete_library({LT, LI}) ->
-    ItemMS = ets:fun2ms(
-        fun(#shurbej_item{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_item, ItemMS),
-    CollMS = ets:fun2ms(
-        fun(#shurbej_collection{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_collection, CollMS),
-    SearchMS = ets:fun2ms(
-        fun(#shurbej_search{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_search, SearchMS),
-    SettingMS = ets:fun2ms(
-        fun(#shurbej_setting{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_setting, SettingMS),
-    FulltextMS = ets:fun2ms(
-        fun(#shurbej_fulltext{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_fulltext, FulltextMS),
-    ItemCollMS = ets:fun2ms(
-        fun(#shurbej_item_collection{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_item_collection, ItemCollMS),
-    TagMS = ets:fun2ms(
-        fun(#shurbej_tag{id = {T, I, _, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_tag, TagMS),
-    DeletedMS = ets:fun2ms(
-        fun(#shurbej_deleted{id = {T, I, _, _}} = R) when T =:= LT, I =:= LI -> R end),
-    delete_matching(shurbej_deleted, DeletedMS),
-    %% file_meta: release the blob ref first, then delete the row. Orphaned
-    %% blobs (refcount hits 0) are stashed for post-commit file:delete.
+    [delete_lib_rows(Table, LT, LI) || Table <- lib_tables_3tuple_key()],
+    [delete_lib_rows(Table, LT, LI) || Table <- lib_tables_4tuple_key()],
+    %% file_meta: release the blob ref first (which may mark it for
+    %% post-commit unlink), then delete the row.
     FileMetaMS = ets:fun2ms(
         fun(#shurbej_file_meta{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
     lists:foreach(fun(#shurbej_file_meta{sha256 = Sha256} = R) ->
@@ -632,9 +612,28 @@ cascade_delete_library({LT, LI}) ->
     end, mnesia:select(shurbej_file_meta, FileMetaMS)),
     ok.
 
-delete_matching(Table, MS) ->
+lib_tables_3tuple_key() ->
+    [shurbej_item, shurbej_collection, shurbej_search,
+     shurbej_setting, shurbej_fulltext, shurbej_item_collection].
+
+lib_tables_4tuple_key() ->
+    [shurbej_tag, shurbej_deleted].
+
+delete_lib_rows(Table, LT, LI) ->
+    %% Every library-scoped table puts the id tuple in position 2 of the
+    %% record (mnesia record attributes start at 2). Match specs work the
+    %% same for 3- and 4-element id tuples because we only bind the first
+    %% two positions.
+    MS = [{mk_row_pattern(Table), [{'=:=', {element, 1, {element, 2, '$_'}}, LT},
+                                   {'=:=', {element, 2, {element, 2, '$_'}}, LI}],
+           ['$_']}],
     lists:foreach(fun(R) -> mnesia:delete_object(R) end,
                   mnesia:select(Table, MS)).
+
+mk_row_pattern(Table) ->
+    %% A fully-wild record pattern — Table tagged, every field '_'.
+    Arity = length(mnesia:table_info(Table, attributes)),
+    list_to_tuple([Table | lists:duplicate(Arity, '_')]).
 
 %% Orphan-blob bookkeeping. `delete_file_meta` and `cascade_delete_library`
 %% record freed blob hashes here while running inside a Mnesia transaction;

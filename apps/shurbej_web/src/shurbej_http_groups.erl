@@ -35,51 +35,7 @@ handle_get(UserId, Req0, State) ->
             Req = shurbej_http_common:json_response(200, Map, 0, Req0),
             {ok, Req, State};
         _ ->
-            Body = [envelope_group(G) || G <- Groups],
+            Body = [shurbej_http_common:envelope_group(G) || G <- Groups],
             Req = shurbej_http_common:json_response(200, Body, 0, Req0),
             {ok, Req, State}
     end.
-
-envelope_group(#shurbej_group{
-        group_id = Id, name = Name, owner_id = Owner, type = Type,
-        description = Desc, url = Url, has_image = HasImage,
-        library_editing = LibEd, library_reading = LibRd, file_editing = FileEd,
-        version = Version}) ->
-    Base = shurbej_http_common:base_url(),
-    IdBin = integer_to_binary(Id),
-    #{
-        <<"id">> => Id,
-        <<"version">> => Version,
-        <<"links">> => #{
-            <<"self">> => #{
-                <<"href">> => <<Base/binary, "/groups/", IdBin/binary>>,
-                <<"type">> => <<"application/json">>
-            },
-            <<"alternate">> => #{
-                <<"href">> => <<Base/binary, "/groups/", IdBin/binary>>,
-                <<"type">> => <<"text/html">>
-            }
-        },
-        <<"meta">> => #{
-            <<"created">> => <<>>,
-            <<"lastModified">> => <<>>,
-            <<"numItems">> => 0
-        },
-        <<"data">> => #{
-            <<"id">> => Id,
-            <<"version">> => Version,
-            <<"name">> => Name,
-            <<"owner">> => Owner,
-            <<"type">> => type_to_binary(Type),
-            <<"description">> => Desc,
-            <<"url">> => Url,
-            <<"hasImage">> => HasImage,
-            <<"libraryEditing">> => atom_to_binary(LibEd),
-            <<"libraryReading">> => atom_to_binary(LibRd),
-            <<"fileEditing">> => atom_to_binary(FileEd)
-        }
-    }.
-
-type_to_binary(private) -> <<"Private">>;
-type_to_binary(public_closed) -> <<"PublicClosed">>;
-type_to_binary(public_open) -> <<"PublicOpen">>.
