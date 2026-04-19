@@ -4,8 +4,6 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    %% Start pg scope for streaming pub/sub
-    pg:start_link(shurbej_stream),
     Dispatch = cowboy_router:compile([
         {'_', shurbej_http:routes()}
     ]),

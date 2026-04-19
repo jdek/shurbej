@@ -1,9 +1,24 @@
 -module(shurbej_http).
--export([routes/0]).
+-export([routes/0, web_dist_dir/0, web_dist_path/1]).
+
+%% Resolve once at route-compile time so the SPA handler doesn't recompute it
+%% per request. Falls back to "web/dist" relative to cwd for dev.
+web_dist_dir() ->
+    case application:get_env(shurbej, web_dist_dir) of
+        {ok, Dir} -> to_list(Dir);
+        undefined -> "web/dist"
+    end.
+
+web_dist_path(Rel) ->
+    filename:join(web_dist_dir(), Rel).
+
+to_list(B) when is_binary(B) -> binary_to_list(B);
+to_list(L) when is_list(L) -> L.
 
 routes() ->
     UserRoutes = library_routes("/users/:user_id"),
     GroupRoutes = library_routes("/groups/:group_id"),
+    AssetsDir = filename:join(web_dist_dir(), "assets"),
     [
         %% Auth — session-based login flow
         {"/keys", shurbej_http_keys, #{action => create_key}},
@@ -51,7 +66,7 @@ routes() ->
         {"/retractions/list", shurbej_http_stub, #{body => []}},
 
         %% Web UI (built SPA — catch-all, must be last)
-        {"/assets/[...]", cowboy_static, {dir, "web/dist/assets"}},
+        {"/assets/[...]", cowboy_static, {dir, AssetsDir}},
         {"/[...]", shurbej_http_spa, #{}}
     ].
 

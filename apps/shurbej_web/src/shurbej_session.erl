@@ -25,6 +25,7 @@
 
 -define(TABLE, shurbej_login_sessions).
 -define(SUBSCRIBERS, shurbej_login_subscribers).
+-define(RATE_TABLE, shurbej_login_rate).
 -define(SESSION_TTL_MS, 600000). %% 10 minutes
 -define(MAX_PENDING_SESSIONS, 100).
 
@@ -91,6 +92,7 @@ insert_raw(Token, Session) ->
 init([]) ->
     ets:new(?TABLE, [named_table, protected, set]),
     ets:new(?SUBSCRIBERS, [named_table, protected, bag]),
+    ets:new(?RATE_TABLE, [named_table, protected, set]),
     {ok, #{}}.
 
 handle_call(create, _From, State) ->
@@ -153,9 +155,7 @@ handle_call(cleanup_expired, _From, State) ->
     Expired = ets:foldl(fun
         ({Token, #{created := Created}}, Acc) when Now - Created > ?SESSION_TTL_MS ->
             [Token | Acc];
-        (_, Acc) ->
-            %% Skip rate-limit entries (3-element tuples) and other non-session entries
-            Acc
+        (_, Acc) -> Acc
     end, [], ?TABLE),
     lists:foreach(fun(Token) ->
         ets:delete(?TABLE, Token),
@@ -168,30 +168,28 @@ handle_call({insert_raw, Token, Session}, _From, State) ->
     {reply, ok, State};
 
 handle_call({check_login_rate, Username}, _From, State) ->
-    Key = {login_rate, Username},
     Now = erlang:system_time(second),
-    Reply = case ets:lookup(?TABLE, Key) of
+    Reply = case ets:lookup(?RATE_TABLE, Username) of
         [{_, Count, WindowStart}] when Now - WindowStart < ?RATE_WINDOW_SECS ->
             case Count >= ?MAX_LOGIN_ATTEMPTS of
                 true  -> {error, rate_limited};
                 false ->
-                    ets:insert(?TABLE, {Key, Count + 1, WindowStart}),
+                    ets:insert(?RATE_TABLE, {Username, Count + 1, WindowStart}),
                     ok
             end;
         _ ->
-            ets:insert(?TABLE, {Key, 1, Now}),
+            ets:insert(?RATE_TABLE, {Username, 1, Now}),
             ok
     end,
     {reply, Reply, State};
 
 handle_call({release_login_rate, Username}, _From, State) ->
     %% Successful login — roll back the slot reserved by check_login_rate.
-    Key = {login_rate, Username},
-    case ets:lookup(?TABLE, Key) of
+    case ets:lookup(?RATE_TABLE, Username) of
         [{_, Count, _WindowStart}] when Count =< 1 ->
-            ets:delete(?TABLE, Key);
+            ets:delete(?RATE_TABLE, Username);
         [{_, Count, WindowStart}] ->
-            ets:insert(?TABLE, {Key, Count - 1, WindowStart});
+            ets:insert(?RATE_TABLE, {Username, Count - 1, WindowStart});
         _ ->
             ok
     end,

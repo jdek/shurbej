@@ -8,6 +8,11 @@ start_link() ->
 
 init([]) ->
     Children = [
+        %% pg scope for streaming pub/sub — first so subsequent workers can
+        %% assume it exists. pg:start_link/1 starts the named scope process.
+        #{id => shurbej_stream_pg,
+          start => {pg, start_link, [shurbej_stream]},
+          type => worker},
         #{id => shurbej_rate_limit,
           start => {shurbej_rate_limit, start_link, []},
           type => worker},

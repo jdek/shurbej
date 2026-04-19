@@ -14,7 +14,7 @@ init(Req0, State) ->
     end.
 
 serve_spa(Req0, State) ->
-    case file:read_file("web/dist/index.html") of
+    case file:read_file(shurbej_http:web_dist_path("index.html")) of
         {ok, Body} ->
             Req = cowboy_req:reply(200,
                 #{<<"content-type">> => <<"text/html; charset=utf-8">>},
