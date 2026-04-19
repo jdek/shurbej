@@ -180,7 +180,11 @@ handle_authorize(LibRef, ItemKey, Md5, Params, Req1, State) ->
             end
     end.
 
-%% GET /items/:item_key/file/view — serve file inline
+%% GET /items/:item_key/file/view — serve file inline.
+%% Attacker-supplied HTML/SVG attachments would otherwise execute in the
+%% app origin. `Content-Security-Policy: sandbox` forces a unique origin so
+%% scripts can't read session cookies or localStorage; `nosniff` stops
+%% browsers from re-guessing the content type.
 handle_view(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"GET">> ->
@@ -196,7 +200,9 @@ handle_view(Req0, State) ->
                             Req = cowboy_req:reply(200, shurbej_http_common:maybe_backoff(#{
                                 <<"content-type">> => ContentType,
                                 <<"content-disposition">> =>
-                                    <<"inline; filename=\"", SafeName/binary, "\"">>
+                                    <<"inline; filename=\"", SafeName/binary, "\"">>,
+                                <<"content-security-policy">> => <<"sandbox">>,
+                                <<"x-content-type-options">> => <<"nosniff">>
                             }), {sendfile, 0, filelib:file_size(BlobFile), BlobFile}, Req0),
                             {ok, Req, State};
                         false ->
