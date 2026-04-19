@@ -137,11 +137,18 @@ handle_cancel_session(Req0, State) ->
             {ok, Req, State}
     end.
 
-%% GET /keys/:key — verify a specific API key (Zotero-compatible)
+%% GET /keys/:key — verify a specific API key. The caller must present the
+%% same key (Zotero-Api-Key header) as the one in the URL; introspecting
+%% another user's key is forbidden.
 handle_get_by_key(Req0, State) ->
     UrlKey = cowboy_req:binding(key, Req0),
-    case shurbej_auth:key_info(UrlKey) of
-        {ok, #{user_id := UserId, permissions := RawPerms}} ->
+    case authenticated_key_matches(UrlKey, Req0) of
+        {error, Code, Msg} ->
+            Req = shurbej_http_common:error_response(Code, Msg, Req0),
+            {ok, Req, State};
+        ok ->
+            {ok, #{user_id := UserId, permissions := RawPerms}} =
+                shurbej_auth:key_info(UrlKey),
             Username = case shurbej_db:get_user_by_id(UserId) of
                 {ok, #shurbej_user{username = U}} -> U;
                 undefined -> <<"unknown">>
@@ -155,18 +162,35 @@ handle_get_by_key(Req0, State) ->
             },
             {ok, Version} = shurbej_version:get({user, UserId}),
             Req = shurbej_http_common:json_response(200, Body, Version, Req0),
-            {ok, Req, State};
-        {error, invalid} ->
-            Req = shurbej_http_common:error_response(403, <<"Invalid key">>, Req0),
             {ok, Req, State}
     end.
 
-%% DELETE /keys/:key — revoke a specific API key
+%% DELETE /keys/:key — revoke a specific API key. Same ownership rule as GET.
 handle_delete_by_key(Req0, State) ->
     UrlKey = cowboy_req:binding(key, Req0),
-    shurbej_db:delete_key(UrlKey),
-    Req = cowboy_req:reply(204, #{}, <<>>, Req0),
-    {ok, Req, State}.
+    case authenticated_key_matches(UrlKey, Req0) of
+        {error, Code, Msg} ->
+            Req = shurbej_http_common:error_response(Code, Msg, Req0),
+            {ok, Req, State};
+        ok ->
+            shurbej_db:delete_key(UrlKey),
+            Req = cowboy_req:reply(204, #{}, <<>>, Req0),
+            {ok, Req, State}
+    end.
+
+%% Authorize /keys/:key operations. The caller's presented key must be valid
+%% and identical to the URL key — introspection/deletion of another user's
+%% key is refused.
+authenticated_key_matches(UrlKey, Req) ->
+    case shurbej_http_common:extract_api_key(Req) of
+        undefined -> {error, 403, <<"Forbidden">>};
+        PresentedKey ->
+            case shurbej_auth:key_info(PresentedKey) of
+                {error, invalid} -> {error, 403, <<"Invalid key">>};
+                {ok, _} when PresentedKey =:= UrlKey -> ok;
+                {ok, _} -> {error, 403, <<"Forbidden">>}
+            end
+    end.
 
 %% POST /keys — create API key with credentials (Zotero-compatible)
 %% Body: {"username": "...", "password": "...", "name": "...", "access": {...}}
@@ -190,6 +214,7 @@ handle_create_key(Req0, State) ->
                         ok ->
                             case shurbej_db:authenticate_user(Username, Password) of
                                 {ok, UserId} ->
+                                    shurbej_session:record_login_success(Username),
                                     Perms = parse_access_or_default(
                                         maps:get(<<"access">>, Body, undefined)),
                                     ApiKey = generate_api_key(),
@@ -205,7 +230,6 @@ handle_create_key(Req0, State) ->
                                     Req = shurbej_http_common:json_response(201, RespBody, Req1),
                                     {ok, Req, State};
                                 {error, invalid} ->
-                                    shurbej_session:record_login_failure(Username),
                                     Req = shurbej_http_common:error_response(403,
                                         <<"Invalid username or password">>, Req1),
                                     {ok, Req, State}

@@ -59,7 +59,24 @@ handle(<<"GET">>, Req0, State) ->
 handle(<<"POST">>, Req0, State) ->
     LibRef = shurbej_http_common:lib_ref(Req0),
     ItemKey = cowboy_req:binding(item_key, Req0),
-    {ok, Body, Req1} = cowboy_req:read_body(Req0),
+    %% Form bodies are tiny (a few hundred bytes) — cap to keep slow/huge
+    %% POSTs from holding request handlers open.
+    case cowboy_req:read_body(Req0, #{length => 65_536, period => 15_000}) of
+        {ok, Body, Req1} ->
+            handle_post_body(LibRef, ItemKey, Body, Req1, State);
+        {more, _, Req1} ->
+            Req = shurbej_http_common:error_response(413,
+                <<"Request body too large">>, Req1),
+            {ok, Req, State}
+    end;
+
+handle(_, Req0, State) ->
+    Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),
+    {ok, Req, State}.
+
+%% Dispatch a POST body — either an upload registration (uploadKey present)
+%% or an authorization request (md5 + filename + filesize + mtime).
+handle_post_body(LibRef, ItemKey, Body, Req1, State) ->
     case cowboy_req:header(<<"content-type">>, Req1) of
         <<"application/x-www-form-urlencoded", _/binary>> ->
             Params = cow_qs:parse_qs(Body),
@@ -68,91 +85,100 @@ handle(<<"POST">>, Req0, State) ->
             Md5 = proplists:get_value(<<"md5">>, Params),
             case classify_file_post(Upload, UploadKeyParam, Md5) of
                 {register, UploadKey} ->
-                    %% Registration: client confirms upload with uploadKey
-                    case shurbej_files:register_upload(UploadKey) of
-                        {ok, NewVersion} ->
-                            Req = cowboy_req:reply(204, shurbej_http_common:maybe_backoff(#{
-                                <<"last-modified-version">> => integer_to_binary(NewVersion)
-                            }), Req1),
-                            {ok, Req, State};
-                        {error, not_found} ->
-                            Req = shurbej_http_common:error_response(400, <<"Invalid upload key">>, Req1),
-                            {ok, Req, State};
-                        {error, not_stored} ->
-                            Req = shurbej_http_common:error_response(400, <<"File not yet uploaded">>, Req1),
-                            {ok, Req, State};
-                        {error, precondition_failed} ->
-                            Req = shurbej_http_common:error_response(412, <<"Library version conflict">>, Req1),
-                            {ok, Req, State}
-                    end;
+                    handle_register(UploadKey, Req1, State);
                 {authorize, Md5} ->
-                    %% Upload authorization: validate inputs
-                    case shurbej_http_common:validate_md5(Md5) of
-                        {error, _} ->
-                            Req = shurbej_http_common:error_response(400, <<"Invalid MD5 hash">>, Req1),
-                            {ok, Req, State};
-                        ok ->
-                    Filename = shurbej_http_common:sanitize_filename(
-                        proplists:get_value(<<"filename">>, Params, <<"file">>)),
-                    Filesize = case shurbej_http_common:safe_int(
-                        proplists:get_value(<<"filesize">>, Params, <<"0">>)) of
-                        {ok, FS} -> FS; error -> 0
-                    end,
-                    Mtime = case shurbej_http_common:safe_int(
-                        proplists:get_value(<<"mtime">>, Params, <<"0">>)) of
-                        {ok, MT} -> MT; error -> 0
-                    end,
-                    IfNoneMatch = cowboy_req:header(<<"if-none-match">>, Req1),
-                    IfMatch = cowboy_req:header(<<"if-match">>, Req1),
-                    ExistingMeta = shurbej_db:get_file_meta(LibRef, ItemKey),
-                    case check_file_preconditions(IfNoneMatch, IfMatch, ExistingMeta) of
-                        {error, precondition_required} ->
-                            Req = shurbej_http_common:error_response(428,
-                                <<"If-None-Match: * or If-Match: <md5> required">>, Req1),
-                            {ok, Req, State};
-                        {error, precondition_failed} ->
-                            Req = shurbej_http_common:error_response(412,
-                                <<"File has been modified">>, Req1),
-                            {ok, Req, State};
-                        ok ->
-                    case ExistingMeta of
-                        {ok, #shurbej_file_meta{md5 = Md5}} ->
-                            %% Bump version through the gen_server so concurrent
-                            %% exists + registration responses stay ordered.
-                            {ok, NewVer} = shurbej_files:confirm_existing(LibRef, ItemKey),
-                            Req = shurbej_http_common:json_response(200, #{<<"exists">> => 1}, NewVer, Req1),
-                            {ok, Req, State};
-                        _ ->
-                            %% New file — require upload. SHA-256 dedup happens in store().
-                                    UploadKey = shurbej_files:prepare_upload(LibRef, ItemKey, #{
-                                        md5 => Md5, filename => Filename,
-                                        filesize => Filesize, mtime => Mtime
-                                    }),
-                                    BaseUrl = application:get_env(shurbej, base_url, <<"http://localhost:8080">>),
-                                    UploadUrl = iolist_to_binary([BaseUrl, "/upload/", UploadKey]),
-                                    Req = shurbej_http_common:json_response(200, #{
-                                        <<"url">> => UploadUrl,
-                                        <<"contentType">> => <<"application/x-www-form-urlencoded">>,
-                                        <<"prefix">> => <<>>,
-                                        <<"suffix">> => <<>>,
-                                        <<"uploadKey">> => UploadKey
-                                    }, Req1),
-                                    {ok, Req, State}
-                    end
-                    end %% close check_file_preconditions case
-                    end; %% close validate_md5 case
+                    handle_authorize(LibRef, ItemKey, Md5, Params, Req1, State);
                 _ ->
-                    Req = shurbej_http_common:error_response(400, <<"Missing required parameters">>, Req1),
+                    Req = shurbej_http_common:error_response(400,
+                        <<"Missing required parameters">>, Req1),
                     {ok, Req, State}
             end;
         _ ->
-            Req = shurbej_http_common:error_response(400, <<"Unsupported content type">>, Req1),
+            Req = shurbej_http_common:error_response(400,
+                <<"Unsupported content type">>, Req1),
             {ok, Req, State}
-    end;
+    end.
 
-handle(_, Req0, State) ->
-    Req = shurbej_http_common:error_response(405, <<"Method not allowed">>, Req0),
-    {ok, Req, State}.
+handle_register(UploadKey, Req1, State) ->
+    case shurbej_files:register_upload(UploadKey) of
+        {ok, NewVersion} ->
+            Req = cowboy_req:reply(204, shurbej_http_common:maybe_backoff(#{
+                <<"last-modified-version">> => integer_to_binary(NewVersion)
+            }), Req1),
+            {ok, Req, State};
+        {error, not_found} ->
+            Req = shurbej_http_common:error_response(400,
+                <<"Invalid upload key">>, Req1),
+            {ok, Req, State};
+        {error, not_stored} ->
+            Req = shurbej_http_common:error_response(400,
+                <<"File not yet uploaded">>, Req1),
+            {ok, Req, State};
+        {error, precondition_failed} ->
+            Req = shurbej_http_common:error_response(412,
+                <<"Library version conflict">>, Req1),
+            {ok, Req, State}
+    end.
+
+handle_authorize(LibRef, ItemKey, Md5, Params, Req1, State) ->
+    case shurbej_http_common:validate_md5(Md5) of
+        {error, _} ->
+            Req = shurbej_http_common:error_response(400,
+                <<"Invalid MD5 hash">>, Req1),
+            {ok, Req, State};
+        ok ->
+            Filename = shurbej_http_common:sanitize_filename(
+                proplists:get_value(<<"filename">>, Params, <<"file">>)),
+            Filesize = case shurbej_http_common:safe_int(
+                proplists:get_value(<<"filesize">>, Params, <<"0">>)) of
+                {ok, FS} -> FS; error -> 0
+            end,
+            Mtime = case shurbej_http_common:safe_int(
+                proplists:get_value(<<"mtime">>, Params, <<"0">>)) of
+                {ok, MT} -> MT; error -> 0
+            end,
+            IfNoneMatch = cowboy_req:header(<<"if-none-match">>, Req1),
+            IfMatch = cowboy_req:header(<<"if-match">>, Req1),
+            ExistingMeta = shurbej_db:get_file_meta(LibRef, ItemKey),
+            case check_file_preconditions(IfNoneMatch, IfMatch, ExistingMeta) of
+                {error, precondition_required} ->
+                    Req = shurbej_http_common:error_response(428,
+                        <<"If-None-Match: * or If-Match: <md5> required">>, Req1),
+                    {ok, Req, State};
+                {error, precondition_failed} ->
+                    Req = shurbej_http_common:error_response(412,
+                        <<"File has been modified">>, Req1),
+                    {ok, Req, State};
+                ok ->
+                    case ExistingMeta of
+                        {ok, #shurbej_file_meta{md5 = Md5}} ->
+                            %% Matching MD5: bump version through the gen_server
+                            %% so concurrent exists + registration responses
+                            %% stay ordered.
+                            {ok, NewVer} = shurbej_files:confirm_existing(LibRef, ItemKey),
+                            Req = shurbej_http_common:json_response(200,
+                                #{<<"exists">> => 1}, NewVer, Req1),
+                            {ok, Req, State};
+                        _ ->
+                            %% New upload — hand back an uploadKey + URL.
+                            UploadKey = shurbej_files:prepare_upload(LibRef, ItemKey, #{
+                                md5 => Md5, filename => Filename,
+                                filesize => Filesize, mtime => Mtime
+                            }),
+                            BaseUrl = application:get_env(shurbej, base_url,
+                                <<"http://localhost:8080">>),
+                            UploadUrl = iolist_to_binary([BaseUrl, "/upload/", UploadKey]),
+                            Req = shurbej_http_common:json_response(200, #{
+                                <<"url">> => UploadUrl,
+                                <<"contentType">> => <<"application/x-www-form-urlencoded">>,
+                                <<"prefix">> => <<>>,
+                                <<"suffix">> => <<>>,
+                                <<"uploadKey">> => UploadKey
+                            }, Req1),
+                            {ok, Req, State}
+                    end
+            end
+    end.
 
 %% GET /items/:item_key/file/view — serve file inline
 handle_view(Req0, State) ->

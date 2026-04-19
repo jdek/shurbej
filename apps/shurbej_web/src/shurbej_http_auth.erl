@@ -25,6 +25,7 @@ handle_login(Req0, State) ->
                 ok ->
                     case shurbej_db:authenticate_user(Username, Password) of
                         {ok, UserId} ->
+                            shurbej_session:record_login_success(Username),
                             ApiKey = generate_api_key(),
                             shurbej_db:create_key(ApiKey, UserId,
                                 #{library => true, write => true,
@@ -37,7 +38,6 @@ handle_login(Req0, State) ->
                             Req = shurbej_http_common:json_response(200, Body, Req1),
                             {ok, Req, State};
                         {error, invalid} ->
-                            shurbej_session:record_login_failure(Username),
                             Req = shurbej_http_common:error_response(401,
                                 <<"Invalid username or password">>, Req1),
                             {ok, Req, State}

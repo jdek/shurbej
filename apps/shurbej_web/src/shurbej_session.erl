@@ -14,7 +14,7 @@
     subscribe/2,
     cleanup_expired/0,
     check_login_rate/1,
-    record_login_failure/1,
+    record_login_success/1,
     insert_raw/2
 ]).
 
@@ -70,19 +70,17 @@ cleanup_expired() ->
     gen_server:call(?MODULE, cleanup_expired).
 
 %% Rate limiting for login attempts.
+%%
+%% check_login_rate atomically gates AND reserves a slot in the counter
+%% (inside a single gen_server call) so concurrent bursts can't race past
+%% the limit. Callers MUST call record_login_success/1 on a successful
+%% authenticate to refund the slot; otherwise the reservation stands and
+%% the attempt counts against the budget.
 check_login_rate(Username) ->
-    Key = {login_rate, Username},
-    Now = erlang:system_time(second),
-    case ets:lookup(?TABLE, Key) of
-        [{_, Count, WindowStart}] when Now - WindowStart < ?RATE_WINDOW_SECS,
-                                       Count >= ?MAX_LOGIN_ATTEMPTS ->
-            {error, rate_limited};
-        _ ->
-            ok
-    end.
+    gen_server:call(?MODULE, {check_login_rate, Username}).
 
-record_login_failure(Username) ->
-    gen_server:cast(?MODULE, {login_failure, Username}).
+record_login_success(Username) ->
+    gen_server:call(?MODULE, {release_login_rate, Username}).
 
 %% Insert a session with a specific timestamp (for testing expiry).
 insert_raw(Token, Session) ->
@@ -169,23 +167,42 @@ handle_call({insert_raw, Token, Session}, _From, State) ->
     ets:insert(?TABLE, {Token, Session}),
     {reply, ok, State};
 
+handle_call({check_login_rate, Username}, _From, State) ->
+    Key = {login_rate, Username},
+    Now = erlang:system_time(second),
+    Reply = case ets:lookup(?TABLE, Key) of
+        [{_, Count, WindowStart}] when Now - WindowStart < ?RATE_WINDOW_SECS ->
+            case Count >= ?MAX_LOGIN_ATTEMPTS of
+                true  -> {error, rate_limited};
+                false ->
+                    ets:insert(?TABLE, {Key, Count + 1, WindowStart}),
+                    ok
+            end;
+        _ ->
+            ets:insert(?TABLE, {Key, 1, Now}),
+            ok
+    end,
+    {reply, Reply, State};
+
+handle_call({release_login_rate, Username}, _From, State) ->
+    %% Successful login — roll back the slot reserved by check_login_rate.
+    Key = {login_rate, Username},
+    case ets:lookup(?TABLE, Key) of
+        [{_, Count, _WindowStart}] when Count =< 1 ->
+            ets:delete(?TABLE, Key);
+        [{_, Count, WindowStart}] ->
+            ets:insert(?TABLE, {Key, Count - 1, WindowStart});
+        _ ->
+            ok
+    end,
+    {reply, ok, State};
+
 handle_call(_Msg, _From, State) ->
     {reply, {error, unknown}, State}.
 
 handle_cast({delete, Token}, State) ->
     ets:delete(?TABLE, Token),
     ets:delete(?SUBSCRIBERS, Token),
-    {noreply, State};
-
-handle_cast({login_failure, Username}, State) ->
-    Key = {login_rate, Username},
-    Now = erlang:system_time(second),
-    case ets:lookup(?TABLE, Key) of
-        [{_, Count, WindowStart}] when Now - WindowStart < ?RATE_WINDOW_SECS ->
-            ets:insert(?TABLE, {Key, Count + 1, WindowStart});
-        _ ->
-            ets:insert(?TABLE, {Key, 1, Now})
-    end,
     {noreply, State};
 
 handle_cast(_Msg, State) ->

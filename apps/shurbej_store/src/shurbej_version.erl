@@ -57,6 +57,9 @@ handle_cast(_Msg, State) ->
 
 do_write(LibRef, Current, WriteFun, State) ->
     NewVersion = Current + 1,
+    %% Clear any leftover orphan-blob entries from a prior run so aborts
+    %% from that run can't pollute this one.
+    shurbej_db:reset_orphan_blobs(),
     %% Execute write + version update atomically in a Mnesia transaction
     case mnesia:transaction(fun() ->
         case WriteFun(NewVersion) of
@@ -68,6 +71,8 @@ do_write(LibRef, Current, WriteFun, State) ->
         end
     end) of
         {atomic, ok} ->
+            %% Transaction committed — safe to unlink freed blobs now.
+            shurbej_db:reap_orphan_blobs(),
             %% Notify stream subscribers via pg (no compile-time dependency)
             Topic = topic(LibRef),
             try
@@ -77,8 +82,10 @@ do_write(LibRef, Current, WriteFun, State) ->
             end,
             {reply, {ok, NewVersion}, State#{version := NewVersion}};
         {aborted, {error, _} = Err} ->
+            shurbej_db:reset_orphan_blobs(),
             {reply, Err, State};
         {aborted, Reason} ->
+            shurbej_db:reset_orphan_blobs(),
             {reply, {error, Reason}, State}
     end.
 

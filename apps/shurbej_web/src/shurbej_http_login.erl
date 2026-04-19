@@ -68,6 +68,7 @@ handle_post(Req0, State) ->
                         ok ->
                             case shurbej_db:authenticate_user(Username, Password) of
                                 {ok, UserId} ->
+                                    shurbej_session:record_login_success(Username),
                                     ApiKey = generate_api_key(),
                                     shurbej_db:create_key(ApiKey, UserId,
                                         shurbej_http_common:normalize_perms(undefined)),
@@ -78,7 +79,6 @@ handle_post(Req0, State) ->
                                         success_page(), Req1),
                                     {ok, Req, State};
                                 {error, invalid} ->
-                                    shurbej_session:record_login_failure(Username),
                                     Html = login_page(Token, ExpectedCsrf, <<"Invalid username or password.">>),
                                     Req = cowboy_req:reply(200,
                                         ?HTML_HEADERS,

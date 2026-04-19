@@ -34,6 +34,7 @@
     get_file_meta/2, write_file_meta/1, delete_file_meta/2,
     %% Blobs (content-addressed)
     blob_exists/1, blob_ref/1, blob_unref/1,
+    reset_orphan_blobs/0, reap_orphan_blobs/0,
     %% Groups
     get_group/1, list_groups/0, write_group/1, delete_group/1,
     add_group_member/3, remove_group_member/2, get_group_member/2,
@@ -221,8 +222,8 @@ list_items_trash({LT, LI}, Since) ->
 
 list_items_children({LT, LI}, ParentKey, Since) ->
     %% Secondary index on parent_key: O(k) instead of full table scan.
-    Candidates = mnesia:dirty_index_read(shurbej_item, ParentKey,
-                                         #shurbej_item.parent_key),
+    Candidates = db_index_read(shurbej_item, ParentKey,
+                               #shurbej_item.parent_key),
     [I || #shurbej_item{id = {T, Id, _}, version = V, deleted = false} = I
           <- Candidates, T =:= LT, Id =:= LI, V > Since].
 
@@ -362,7 +363,7 @@ delete_item_tags({LT, LI}, ItemKey) ->
         fun(#shurbej_tag{id = {T, I, _, IK}} = Tag)
             when T =:= LT, I =:= LI, IK =:= ItemKey -> Tag
         end),
-    Existing = mnesia:dirty_select(shurbej_tag, MS),
+    Existing = db_select(shurbej_tag, MS),
     lists:foreach(fun(T) -> db_delete_object(T) end, Existing).
 
 list_item_tags({LT, LI}, ItemKey) ->
@@ -466,14 +467,35 @@ write_file_meta(Meta) when is_record(Meta, shurbej_file_meta) ->
     db_write(Meta).
 
 delete_file_meta({LT, LI}, ItemKey) ->
-    %% Unref the blob before removing metadata
+    %% Unref the blob before removing metadata. If the refcount hits 0 the
+    %% blob file needs unlinking from disk — we never do that inside the
+    %% transaction because file IO isn't rollback-safe (an aborted txn would
+    %% leave the metadata restored pointing at a missing file). Instead:
+    %%  - inside a transaction: stash the hash so the transaction's driver
+    %%    can unlink post-commit via reap_orphan_blobs/0
+    %%  - outside: finish the transaction, then unlink.
     case db_read(shurbej_file_meta, {LT, LI, ItemKey}) of
         [#shurbej_file_meta{sha256 = Hash}] ->
-            case blob_unref(Hash) of
-                {ok, 0} -> file:delete(shurbej_files:blob_path(Hash));
-                _ -> ok
-            end,
-            db_delete({shurbej_file_meta, {LT, LI, ItemKey}});
+            case mnesia:is_transaction() of
+                true ->
+                    case blob_unref_tx(Hash) of
+                        0 -> mark_orphan_blob(Hash);
+                        _ -> ok
+                    end,
+                    mnesia:delete({shurbej_file_meta, {LT, LI, ItemKey}});
+                false ->
+                    %% Wrap read/unref/delete in one transaction, then unlink.
+                    {atomic, Remaining} = mnesia:transaction(fun() ->
+                        N = blob_unref_tx(Hash),
+                        mnesia:delete({shurbej_file_meta, {LT, LI, ItemKey}}),
+                        N
+                    end),
+                    case Remaining of
+                        0 -> _ = file:delete(shurbej_files:blob_path(Hash));
+                        _ -> ok
+                    end,
+                    ok
+            end;
         [] ->
             ok
     end.
@@ -499,20 +521,13 @@ blob_ref(Hash) ->
     end),
     ok.
 
+%% Decrement the refcount on a blob. Returns the remaining count (0 means
+%% the blob row was deleted — the file on disk still needs unlinking, which
+%% is the caller's responsibility and must happen *after* the enclosing
+%% transaction commits so an abort can't leave us referencing a missing file).
 blob_unref(Hash) ->
-    {atomic, Result} = mnesia:transaction(fun() ->
-        case mnesia:read(shurbej_blob, Hash, write) of
-            [#shurbej_blob{refcount = N} = Blob] when N > 1 ->
-                mnesia:write(Blob#shurbej_blob{refcount = N - 1}),
-                {ok, N - 1};
-            [#shurbej_blob{refcount = 1}] ->
-                mnesia:delete({shurbej_blob, Hash}),
-                {ok, 0};
-            [] ->
-                {ok, 0}
-        end
-    end),
-    Result.
+    {atomic, N} = mnesia:transaction(fun() -> blob_unref_tx(Hash) end),
+    N.
 
 %% ===================================================================
 %% Collection index
@@ -529,7 +544,7 @@ delete_item_collections({LT, LI}, ItemKey) ->
         fun(#shurbej_item_collection{id = {T, I, _}, item_key = IK} = R)
             when T =:= LT, I =:= LI, IK =:= ItemKey -> R
         end),
-    Existing = mnesia:dirty_select(shurbej_item_collection, MS),
+    Existing = db_select(shurbej_item_collection, MS),
     lists:foreach(fun(R) -> db_delete_object(R) end, Existing).
 
 %% ===================================================================
@@ -550,20 +565,125 @@ write_group(Group) when is_record(Group, shurbej_group) ->
     db_write(Group).
 
 delete_group(GroupId) ->
-    %% Wipe group library data + membership; the caller is admin so we don't
-    %% gate on permissions here.
+    %% Wipe group library data + membership; admin-only op, so no perm check.
+    %% Runs in a single Mnesia transaction so partial failure can't leave
+    %% orphaned items/tags/file_meta/etc. Freed blobs get unlinked from disk
+    %% only after the transaction commits, and the per-library version
+    %% server is shut down after everything has settled.
     LibRef = {group, GroupId},
-    {atomic, ok} = mnesia:transaction(fun() ->
-        %% Remove group and all memberships
+    reset_orphan_blobs(),
+    Result = mnesia:transaction(fun() ->
+        cascade_delete_library(LibRef),
         mnesia:delete({shurbej_group, GroupId}),
         MemberMS = ets:fun2ms(
             fun(#shurbej_group_member{id = {G, _}} = M) when G =:= GroupId -> M end),
         [mnesia:delete_object(M) || M <- mnesia:select(shurbej_group_member, MemberMS)],
-        %% Remove all data associated with this group library
         mnesia:delete({shurbej_library, LibRef}),
         ok
     end),
+    case Result of
+        {atomic, ok} ->
+            reap_orphan_blobs(),
+            shurbej_version_sup:terminate_child(LibRef),
+            ok;
+        {aborted, Reason} ->
+            reset_orphan_blobs(),
+            erlang:error({delete_group_failed, Reason})
+    end.
+
+%% Delete every row belonging to the given library from every per-library
+%% table, releasing blob references as we go. Must be called inside a
+%% Mnesia transaction.
+cascade_delete_library({LT, LI}) ->
+    ItemMS = ets:fun2ms(
+        fun(#shurbej_item{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_item, ItemMS),
+    CollMS = ets:fun2ms(
+        fun(#shurbej_collection{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_collection, CollMS),
+    SearchMS = ets:fun2ms(
+        fun(#shurbej_search{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_search, SearchMS),
+    SettingMS = ets:fun2ms(
+        fun(#shurbej_setting{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_setting, SettingMS),
+    FulltextMS = ets:fun2ms(
+        fun(#shurbej_fulltext{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_fulltext, FulltextMS),
+    ItemCollMS = ets:fun2ms(
+        fun(#shurbej_item_collection{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_item_collection, ItemCollMS),
+    TagMS = ets:fun2ms(
+        fun(#shurbej_tag{id = {T, I, _, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_tag, TagMS),
+    DeletedMS = ets:fun2ms(
+        fun(#shurbej_deleted{id = {T, I, _, _}} = R) when T =:= LT, I =:= LI -> R end),
+    delete_matching(shurbej_deleted, DeletedMS),
+    %% file_meta: release the blob ref first, then delete the row. Orphaned
+    %% blobs (refcount hits 0) are stashed for post-commit file:delete.
+    FileMetaMS = ets:fun2ms(
+        fun(#shurbej_file_meta{id = {T, I, _}} = R) when T =:= LT, I =:= LI -> R end),
+    lists:foreach(fun(#shurbej_file_meta{sha256 = Sha256} = R) ->
+        case blob_unref_tx(Sha256) of
+            0 -> mark_orphan_blob(Sha256);
+            _ -> ok
+        end,
+        mnesia:delete_object(R)
+    end, mnesia:select(shurbej_file_meta, FileMetaMS)),
     ok.
+
+delete_matching(Table, MS) ->
+    lists:foreach(fun(R) -> mnesia:delete_object(R) end,
+                  mnesia:select(Table, MS)).
+
+%% Orphan-blob bookkeeping. `delete_file_meta` and `cascade_delete_library`
+%% record freed blob hashes here while running inside a Mnesia transaction;
+%% the transaction driver (shurbej_version:do_write or delete_group) then
+%% unlinks the files from disk after the transaction commits. On abort the
+%% driver calls reset_orphan_blobs/0 instead so nothing gets unlinked.
+
+-define(ORPHAN_PDICT_KEY, shurbej_orphan_blobs).
+
+mark_orphan_blob(Hash) ->
+    put(?ORPHAN_PDICT_KEY, [Hash | orphan_blobs()]),
+    ok.
+
+orphan_blobs() ->
+    case get(?ORPHAN_PDICT_KEY) of
+        undefined -> [];
+        L when is_list(L) -> L
+    end.
+
+%% Clear the pending-unlink list. Use this before starting a transaction
+%% whose failure should not trigger any blob deletions.
+reset_orphan_blobs() ->
+    erase(?ORPHAN_PDICT_KEY),
+    ok.
+
+%% Flush the pending-unlink list and delete each blob from disk. Call this
+%% AFTER a successful transaction commit (never before — if the commit
+%% aborts we must not unlink).
+reap_orphan_blobs() ->
+    Hashes = orphan_blobs(),
+    erase(?ORPHAN_PDICT_KEY),
+    lists:foreach(fun(Hash) ->
+        _ = file:delete(shurbej_files:blob_path(Hash))
+    end, Hashes),
+    ok.
+
+%% In-transaction blob unref — mirrors blob_unref/1 but without starting a
+%% nested transaction. Returns the remaining refcount.
+blob_unref_tx(Hash) ->
+    case mnesia:read(shurbej_blob, Hash, write) of
+        [#shurbej_blob{refcount = N} = Blob] when N > 1 ->
+            mnesia:write(Blob#shurbej_blob{refcount = N - 1}),
+            N - 1;
+        [#shurbej_blob{}] ->
+            mnesia:delete({shurbej_blob, Hash}),
+            0;
+        [] ->
+            0
+    end.
 
 add_group_member(GroupId, UserId, Role) ->
     db_write(#shurbej_group_member{id = {GroupId, UserId}, role = Role}).
@@ -621,4 +741,16 @@ db_delete_object(Record) ->
     case mnesia:is_transaction() of
         true -> mnesia:delete_object(Record);
         false -> mnesia:dirty_delete_object(Record)
+    end.
+
+db_select(Table, MS) ->
+    case mnesia:is_transaction() of
+        true -> mnesia:select(Table, MS);
+        false -> mnesia:dirty_select(Table, MS)
+    end.
+
+db_index_read(Table, Key, Pos) ->
+    case mnesia:is_transaction() of
+        true -> mnesia:index_read(Table, Key, Pos);
+        false -> mnesia:dirty_index_read(Table, Key, Pos)
     end.

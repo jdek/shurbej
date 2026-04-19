@@ -294,6 +294,9 @@
     %% Coverage: key management
     keys_create_with_custom_access/1,
     keys_get_by_key_returns_access/1,
+    keys_get_by_key_cross_user_blocked/1,
+    keys_get_by_key_unauthenticated_blocked/1,
+    keys_delete_by_key_cross_user_blocked/1,
 
     %% Coverage: file error paths
     files_upload_bad_content_type/1,
@@ -303,13 +306,17 @@
     files_upload_precondition_failed/1,
     files_view_404_no_meta/1,
     files_view_url_404_no_meta/1,
+    files_upload_body_too_large/1,
 
     %% Coverage: admin helpers
     admin_group_bad_type/1,
     admin_add_member_errors/1,
     admin_remove_member_and_lists/1,
     admin_create_api_key_user_not_found/1,
-    admin_create_api_key_read_only/1
+    admin_create_api_key_read_only/1,
+    admin_delete_group_cascades/1,
+    item_delete_cascade_unlinks_blob/1,
+    login_rate_burst_is_capped/1
 ]).
 
 all() ->
@@ -488,6 +495,9 @@ all() ->
         groups_list_versions_populated,
         keys_create_with_custom_access,
         keys_get_by_key_returns_access,
+        keys_get_by_key_cross_user_blocked,
+        keys_get_by_key_unauthenticated_blocked,
+        keys_delete_by_key_cross_user_blocked,
         files_upload_bad_content_type,
         files_upload_missing_params,
         files_upload_bad_md5,
@@ -495,11 +505,15 @@ all() ->
         files_upload_precondition_failed,
         files_view_404_no_meta,
         files_view_url_404_no_meta,
+        files_upload_body_too_large,
         admin_group_bad_type,
         admin_add_member_errors,
         admin_remove_member_and_lists,
         admin_create_api_key_user_not_found,
-        admin_create_api_key_read_only
+        admin_create_api_key_read_only,
+        admin_delete_group_cascades,
+        item_delete_cascade_unlinks_blob,
+        login_rate_burst_is_capped
     ].
 
 init_per_suite(Config) ->
@@ -1100,7 +1114,7 @@ file_refcount_cleanup(Config) ->
     ?assert(filelib:is_regular(BlobFile)),
     [{shurbej_blob, Sha256, _, 1}] = mnesia:dirty_read(shurbej_blob, Sha256),
     %% Unref — should delete blob record and we can delete the file
-    {ok, 0} = shurbej_db:blob_unref(Sha256),
+    0 = shurbej_db:blob_unref(Sha256),
     ?assertEqual([], mnesia:dirty_read(shurbej_blob, Sha256)),
     file:delete(BlobFile),
     ?assertNot(filelib:is_regular(BlobFile)),
@@ -2188,7 +2202,8 @@ keys_get_by_key(Config) ->
     ApiKey = ?config(api_key, Config),
     Base = ?config(base, Config),
     {ok, {{_, 200, _}, _, RespBody}} =
-        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(ApiKey), []},
+        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(ApiKey),
+                            [{"Zotero-API-Key", binary_to_list(ApiKey)}]},
                       [], [{body_format, binary}]),
     Resp = simdjson:decode(RespBody),
     ?assertMatch(#{<<"key">> := _, <<"userID">> := 1}, Resp),
@@ -2196,13 +2211,16 @@ keys_get_by_key(Config) ->
 
 keys_get_by_key_invalid(Config) ->
     Base = ?config(base, Config),
+    ApiKey = ?config(api_key, Config),
+    %% Presented key valid, URL key bogus — must 403 (no info leak).
     {ok, {{_, 403, _}, _, _}} =
-        httpc:request(get, {Base ++ "/keys/bogus_key_not_real", []},
+        httpc:request(get, {Base ++ "/keys/bogus_key_not_real",
+                            [{"Zotero-API-Key", binary_to_list(ApiKey)}]},
                       [], [{body_format, binary}]),
     ok.
 
 keys_delete_by_key(Config) ->
-    %% Create a key to delete
+    %% Create a key to delete, then self-authenticate to revoke it.
     Base = ?config(base, Config),
     Body = simdjson:encode(#{<<"username">> => <<"testuser">>,
                              <<"password">> => <<"testpass">>,
@@ -2211,13 +2229,14 @@ keys_delete_by_key(Config) ->
         httpc:request(post, {Base ++ "/keys", [], "application/json", Body},
                       [], [{body_format, binary}]),
     Key = maps:get(<<"key">>, simdjson:decode(RespBody)),
-    %% Delete it
     {ok, {{_, 204, _}, _, _}} =
-        httpc:request(delete, {Base ++ "/keys/" ++ binary_to_list(Key), []},
+        httpc:request(delete, {Base ++ "/keys/" ++ binary_to_list(Key),
+                               [{"Zotero-API-Key", binary_to_list(Key)}]},
                       [], [{body_format, binary}]),
-    %% Verify it's gone
+    %% Subsequent GET with the revoked key — auth itself fails now, so 403.
     {ok, {{_, 403, _}, _, _}} =
-        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(Key), []},
+        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(Key),
+                            [{"Zotero-API-Key", binary_to_list(Key)}]},
                       [], [{body_format, binary}]),
     ok.
 
@@ -2466,7 +2485,7 @@ backoff_retry_after_on_429(Config) ->
 spa_serves_html_for_browser(Config) ->
     Base = ?config(base, Config),
     %% Browser-like request with Accept: text/html to unknown path
-    {ok, {{_, Status, _}, RespHeaders, _}} =
+    {ok, {{_, Status, _}, _RespHeaders, _}} =
         httpc:request(get, {Base ++ "/some/spa/route",
             [{"Accept", "text/html,application/xhtml+xml"}]},
             [], [{body_format, binary}]),
@@ -2510,7 +2529,6 @@ upload_multipart(Config) ->
         [{"If-None-Match", "*"}], Config),
     UploadUrl = binary_to_list(maps:get(<<"url">>, UpResp)),
     %% Send as multipart/form-data
-    Boundary = <<"----TestBoundary123">>,
     MultipartBody = <<"------TestBoundary123\r\n",
         "Content-Disposition: form-data; name=\"file\"; filename=\"multipart_test.txt\"\r\n",
         "Content-Type: application/octet-stream\r\n\r\n",
@@ -2613,7 +2631,7 @@ stream_topic_updated(Config) ->
     gun:close(Pid),
     ok.
 
-stream_bad_key(Config) ->
+stream_bad_key(_Config) ->
     {ok, _} = application:ensure_all_started(gun),
     {ok, Pid} = gun:open("localhost", 18080),
     {ok, _} = gun:await_up(Pid),
@@ -2630,7 +2648,7 @@ stream_bad_key(Config) ->
     gun:close(Pid),
     ok.
 
-stream_bad_message(Config) ->
+stream_bad_message(_Config) ->
     {ok, _} = application:ensure_all_started(gun),
     {ok, Pid} = gun:open("localhost", 18080),
     {ok, _} = gun:await_up(Pid),
@@ -2908,6 +2926,35 @@ keys_get_by_key_returns_access(Config) ->
     ?assert(maps:is_key(<<"access">>, Body)),
     ok.
 
+keys_get_by_key_cross_user_blocked(Config) ->
+    {_Uid1, KeyA} = mk_user(full),
+    {_Uid2, KeyB} = mk_user(full),
+    %% Caller authenticates with KeyA but asks about KeyB — must 403.
+    Path = "/keys/" ++ binary_to_list(KeyB),
+    {Status, _} = request_with_key(get, Path, [], <<>>, Config, KeyA),
+    ?assertEqual(403, Status),
+    ok.
+
+keys_get_by_key_unauthenticated_blocked(Config) ->
+    {_Uid, Key} = mk_user(full),
+    Base = ?config(base, Config),
+    %% No auth header at all.
+    {ok, {{_, Status, _}, _, _}} =
+        httpc:request(get, {Base ++ "/keys/" ++ binary_to_list(Key), []},
+                      [], [{body_format, binary}]),
+    ?assertEqual(403, Status),
+    ok.
+
+keys_delete_by_key_cross_user_blocked(Config) ->
+    {_Uid1, KeyA} = mk_user(full),
+    {_Uid2, KeyB} = mk_user(full),
+    Path = "/keys/" ++ binary_to_list(KeyB),
+    {Status, _} = request_with_key(delete, Path, [], <<>>, Config, KeyA),
+    ?assertEqual(403, Status),
+    %% KeyB must still be valid.
+    {200, _} = request_with_key(get, "/keys/current", [], <<>>, Config, KeyB),
+    ok.
+
 %% ===================================================================
 %% File error paths
 %% ===================================================================
@@ -3018,6 +3065,23 @@ files_view_url_404_no_meta(Config) ->
     ?assertEqual(404, Status),
     ok.
 
+files_upload_body_too_large(Config) ->
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"huge">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    %% Form POST bodies get capped at 64 KiB — send 128 KiB and expect 413.
+    BigBody = binary:copy(<<"x=1&">>, 32768),
+    Base = ?config(base, Config),
+    ApiKey = ?config(api_key, Config),
+    Url = Base ++ "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+    {ok, {{_, Status, _}, _, _}} =
+        httpc:request(post,
+                      {Url, [{"Zotero-API-Key", binary_to_list(ApiKey)}],
+                       "application/x-www-form-urlencoded", BigBody},
+                      [], [{body_format, binary}]),
+    ?assertEqual(413, Status),
+    ok.
+
 %% ===================================================================
 %% shurbej_admin helpers
 %% ===================================================================
@@ -3058,6 +3122,120 @@ admin_remove_member_and_lists(_Config) ->
 admin_create_api_key_user_not_found(_Config) ->
     ?assertEqual({error, user_not_found},
                  shurbej_admin:create_api_key(99999999, <<"nope">>)),
+    ok.
+
+item_delete_cascade_unlinks_blob(Config) ->
+    %% When the last file_meta for a blob is deleted via cascade, the blob
+    %% file on disk must be unlinked — but only after the cascade's
+    %% transaction commits, not before.
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"unique-blob">>},
+    {200, _, CB} = post_json("/users/1/items", [Item], Config),
+    #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
+    FileData = <<"unique-blob-content-", (integer_to_binary(
+        erlang:unique_integer([positive])))/binary>>,
+    Md5 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    Form = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
+        {<<"filename">>, <<"u.pdf">>},
+        {<<"filesize">>, integer_to_binary(byte_size(FileData))},
+        {<<"mtime">>, <<"1">>}
+    ]),
+    Path = "/users/1/items/" ++ binary_to_list(Key) ++ "/file",
+    {200, _, Auth} = post_form(Path, Form, [{"If-None-Match", "*"}], Config),
+    {201, _, _} = post_raw(binary_to_list(maps:get(<<"url">>, Auth)), FileData),
+    {204, _, _} = post_form(Path,
+        cow_qs:qs([{<<"uploadKey">>, maps:get(<<"uploadKey">>, Auth)}]), Config),
+    Sha256 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    BlobFile = shurbej_files:blob_path(Sha256),
+    ?assert(filelib:is_regular(BlobFile)),
+    %% Delete the item — cascade should unlink the blob post-commit.
+    {204, _, _} = request(delete, "/users/1/items/" ++ binary_to_list(Key),
+                          [], <<>>, Config, true),
+    ?assertEqual(false, shurbej_db:blob_exists(Sha256)),
+    ?assertNot(filelib:is_regular(BlobFile)),
+    ok.
+
+login_rate_burst_is_capped(Config) ->
+    %% Fire MAX+5 concurrent bad logins across independent httpc profiles
+    %% so requests actually arrive concurrently at the gen_server rather
+    %% than being serialized by the default httpc connection pool.
+    Base = ?config(base, Config),
+    Username = <<"burstuser_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    ok = shurbej_admin:create_user(Username, <<"rightpw">>),
+    Parent = self(),
+    N = 10,
+    %% Gate all spawned workers on a single release signal so they fire as
+    %% close to simultaneously as possible.
+    Gate = make_ref(),
+    Pids = [spawn_link(fun() ->
+        ProfileName = list_to_atom("burst_" ++ integer_to_list(I)),
+        {ok, _} = inets:start(httpc, [{profile, ProfileName}]),
+        receive {go, Gate} -> ok end,
+        Body = simdjson:encode(#{<<"username">> => Username,
+                                 <<"password">> => <<"wrongpw">>}),
+        Response = httpc:request(post, {Base ++ "/auth/login", [],
+                                        "application/json", Body},
+                                 [], [{body_format, binary}], ProfileName),
+        Status = case Response of
+            {ok, {{_, S, _}, _, _}} -> S;
+            _ -> error
+        end,
+        inets:stop(httpc, ProfileName),
+        Parent ! {done, Status}
+    end) || I <- lists:seq(1, N)],
+    [P ! {go, Gate} || P <- Pids],
+    Statuses = [receive {done, S} -> S after 10000 -> timeout end
+                || _ <- lists:seq(1, N)],
+    Accepted = length([S || S <- Statuses, S =/= 429]),
+    RateLimited = length([S || S <- Statuses, S =:= 429]),
+    ?assert(Accepted =< 5, {accepted_too_many, Accepted, Statuses}),
+    ?assert(RateLimited >= N - 5, {too_few_429, RateLimited, Statuses}),
+    ok.
+
+admin_delete_group_cascades(Config) ->
+    %% Create a group, populate it with an item, a tag, and a file, then
+    %% delete the group and verify no rows survive for that library.
+    {GroupId, _OwnerId, OwnerKey} = mk_group(#{
+        library_editing => members, library_reading => members, file_editing => members
+    }),
+    ItemsPath = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
+    Item = #{<<"itemType">> => <<"attachment">>, <<"title">> => <<"doomed">>,
+             <<"tags">> => [#{<<"tag">> => <<"cascade">>}]},
+    {200, CB} = request_with_key(post, ItemsPath, [], simdjson:encode([Item]),
+                                 Config, OwnerKey),
+    #{<<"0">> := #{<<"key">> := ItemKey}} = maps:get(<<"successful">>, CB),
+    FileData = <<"cascade-me">>,
+    Md5 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(md5, FileData)])),
+    FilePath = ItemsPath ++ "/" ++ binary_to_list(ItemKey) ++ "/file",
+    Form = cow_qs:qs([
+        {<<"upload">>, <<"1">>}, {<<"md5">>, Md5},
+        {<<"filename">>, <<"doomed.pdf">>},
+        {<<"filesize">>, integer_to_binary(byte_size(FileData))},
+        {<<"mtime">>, <<"1">>}
+    ]),
+    {200, Auth} = post_form_with_key(FilePath, Form,
+        [{"If-None-Match", "*"}], Config, OwnerKey),
+    UploadUrl = maps:get(<<"url">>, Auth),
+    UploadKey = maps:get(<<"uploadKey">>, Auth),
+    {201, _, _} = post_raw(binary_to_list(UploadUrl), FileData),
+    {204, _} = post_form_with_key(FilePath,
+        cow_qs:qs([{<<"uploadKey">>, UploadKey}]), [], Config, OwnerKey),
+    %% Confirm rows exist and the blob file is on disk.
+    ?assertMatch({ok, _}, shurbej_db:get_item({group, GroupId}, ItemKey)),
+    ?assertMatch({ok, _}, shurbej_db:get_file_meta({group, GroupId}, ItemKey)),
+    Sha256 = list_to_binary(lists:flatten(
+        [io_lib:format("~2.16.0b", [B]) || <<B>> <= crypto:hash(sha256, FileData)])),
+    BlobFile = shurbej_files:blob_path(Sha256),
+    ?assert(filelib:is_regular(BlobFile)),
+    %% Delete and re-check: rows, blob row, AND the file on disk are gone.
+    ok = shurbej_admin:delete_group(GroupId),
+    ?assertEqual(undefined, shurbej_db:get_item({group, GroupId}, ItemKey)),
+    ?assertEqual(undefined, shurbej_db:get_file_meta({group, GroupId}, ItemKey)),
+    ?assertEqual(false, shurbej_db:blob_exists(Sha256)),
+    ?assertNot(filelib:is_regular(BlobFile)),
     ok.
 
 admin_create_api_key_read_only(Config) ->

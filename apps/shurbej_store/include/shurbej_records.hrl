@@ -1,6 +1,16 @@
 %% Library identifier — disjoint keyspace for user and group libraries.
 -type lib_ref() :: {user, integer()} | {group, integer()}.
 
+%% On-disk schema version. Bump when any record layout, key shape, or
+%% table set changes in a way incompatible with earlier data. A single row
+%% in shurbej_schema_meta pins the current expected version; startup
+%% compares and refuses to boot on mismatch so a stale db.dmp can't silently
+%% misalign fields.
+-record(shurbej_schema_meta, {
+    key     :: version,
+    value   :: integer()
+}).
+
 -record(shurbej_library, {
     ref           :: lib_ref(),
     version = 0   :: integer()
