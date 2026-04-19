@@ -41,7 +41,16 @@ handle_get(Req0, State) ->
     end.
 
 handle_post(Req0, State) ->
-    {ok, Body, Req1} = cowboy_req:read_body(Req0, #{length => 4096}),
+    case cowboy_req:read_body(Req0, #{length => 4096}) of
+        {ok, Body, Req1} ->
+            handle_post_body(Body, Req1, State);
+        {more, _, Req1} ->
+            Req = cowboy_req:reply(413, ?HTML_HEADERS,
+                error_page(<<"Request too large.">>), Req1),
+            {ok, Req, State}
+    end.
+
+handle_post_body(Body, Req1, State) ->
     Params = cow_qs:parse_qs(Body),
     Token = proplists:get_value(<<"token">>, Params, <<>>),
     Username = proplists:get_value(<<"username">>, Params, <<>>),

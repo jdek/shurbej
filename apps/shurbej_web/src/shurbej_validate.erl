@@ -63,7 +63,9 @@ key_format(Key) when is_binary(Key) ->
             end;
         _ ->
             {error, <<"Key must be exactly 8 characters">>}
-    end.
+    end;
+key_format(_) ->
+    {error, <<"Key must be a string">>}.
 
 %% Internal
 

@@ -46,7 +46,10 @@ websocket_init(#{api_key := ApiKey} = State) ->
 
 %% Client messages
 websocket_handle({text, Msg}, State) ->
-    case catch simdjson:decode(Msg) of
+    Decoded = try simdjson:decode(Msg)
+              catch error:_ -> invalid
+              end,
+    case Decoded of
         #{<<"action">> := Action} = Payload ->
             handle_action(Action, Payload, State);
         _ ->

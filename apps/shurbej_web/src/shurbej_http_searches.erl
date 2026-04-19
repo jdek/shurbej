@@ -162,24 +162,31 @@ handle(<<"DELETE">>, Req0, State) ->
     LibRef = shurbej_http_common:lib_ref(Req0),
     ExpectedVersion = shurbej_http_common:get_if_unmodified(Req0),
     #{searchKey := KeysParam} = cowboy_req:match_qs([{searchKey, [], <<>>}], Req0),
-    Keys = binary:split(KeysParam, <<",">>, [global]),
-    case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
-        lists:foreach(fun(K) ->
-            shurbej_db:mark_search_deleted(LibRef, K, NewVersion),
-            shurbej_db:record_deletion(LibRef, <<"search">>, K, NewVersion)
-        end, Keys),
-        ok
-    end) of
-        {ok, NewVersion} ->
-            Req = cowboy_req:reply(204, #{
-                <<"last-modified-version">> => integer_to_binary(NewVersion)
-            }, Req0),
+    Keys = [K || K <- binary:split(KeysParam, <<",">>, [global]), K =/= <<>>],
+    case Keys of
+        [] ->
+            Req = shurbej_http_common:error_response(400,
+                <<"No search keys specified">>, Req0),
             {ok, Req, State};
-        {error, precondition, CurrentVersion} ->
-            Req = shurbej_http_common:json_response(412,
-                #{<<"message">> => <<"Library has been modified since specified version">>},
-                CurrentVersion, Req0),
-            {ok, Req, State}
+        _ ->
+            case shurbej_version:write(LibRef, ExpectedVersion, fun(NewVersion) ->
+                lists:foreach(fun(K) ->
+                    shurbej_db:mark_search_deleted(LibRef, K, NewVersion),
+                    shurbej_db:record_deletion(LibRef, <<"search">>, K, NewVersion)
+                end, Keys),
+                ok
+            end) of
+                {ok, NewVersion} ->
+                    Req = cowboy_req:reply(204, #{
+                        <<"last-modified-version">> => integer_to_binary(NewVersion)
+                    }, Req0),
+                    {ok, Req, State};
+                {error, precondition, CurrentVersion} ->
+                    Req = shurbej_http_common:json_response(412,
+                        #{<<"message">> => <<"Library has been modified since specified version">>},
+                        CurrentVersion, Req0),
+                    {ok, Req, State}
+            end
     end;
 
 handle(_, Req0, State) ->

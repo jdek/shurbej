@@ -13,7 +13,10 @@ websocket_init(State) ->
 
 %% Handle incoming messages from the client.
 websocket_handle({text, Msg}, State) ->
-    case catch simdjson:decode(Msg) of
+    Decoded = try simdjson:decode(Msg)
+              catch error:_ -> invalid
+              end,
+    case Decoded of
         #{<<"action">> := <<"subscribe">>, <<"topic">> := <<"login-session:", Token/binary>>} ->
             shurbej_session:subscribe(Token, self()),
             Reply = simdjson:encode(#{
