@@ -5,7 +5,12 @@
   ...
 }: let
   cfg = config.services.shurbej;
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib) mkEnableOption mkIf mkOption optionalString types;
+
+  listenTerm =
+    if cfg.socketPath != null
+    then ''{listen, {unix, "${cfg.socketPath}"}}''
+    else ''{listen, {tcp, ${toString cfg.port}}}'';
 
   # Stacked on top of the release's sys.config via `-config` in ERL_FLAGS,
   # so later values win. `${SHURBEJ_COOKIE}` in vm.args is still substituted
@@ -18,7 +23,7 @@
   overrideConfig = pkgs.writeText "shurbej-overrides.config" ''
     [
       {shurbej, [
-        {http_port, ${toString cfg.port}},
+        ${listenTerm},
         {file_storage_path, "${cfg.dataDir}/files"},
         {base_url, "${cfg.baseUrl}"},
         {web_dist_dir, "${cfg.package}/libexec/shurbej/web_dist"}
@@ -55,8 +60,25 @@ in {
       type = types.port;
       default = 8080;
       description = ''
-        TCP port shurbej's HTTP server listens on. Expected to be fronted by
-        a reverse proxy; shurbej itself does not terminate TLS.
+        TCP port shurbej's HTTP server listens on. Ignored when
+        `socketPath` is set. Expected to be fronted by a reverse proxy;
+        shurbej itself does not terminate TLS.
+      '';
+    };
+
+    socketPath = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      example = "/run/shurbej/http.sock";
+      description = ''
+        If non-null, shurbej listens on a Unix domain socket at this path
+        instead of `port`. Place it under `/run/shurbej` (the unit's
+        RuntimeDirectory) so systemd cleans it up on stop. The socket is
+        chmod'd 0660 by shurbej on bind; the reverse proxy's user must
+        therefore share `group` for the connect to succeed.
+
+        When this is set and `services.nginx.enable` is also true, this
+        module adds the nginx user to `group` automatically.
       '';
     };
 
@@ -93,13 +115,20 @@ in {
   };
 
   config = mkIf cfg.enable {
-    users.users = mkIf (cfg.user == "shurbej") {
-      shurbej = {
-        group = cfg.group;
-        isSystemUser = true;
-        home = cfg.dataDir;
-      };
-    };
+    users.users = lib.mkMerge [
+      (mkIf (cfg.user == "shurbej") {
+        shurbej = {
+          group = cfg.group;
+          isSystemUser = true;
+          home = cfg.dataDir;
+        };
+      })
+      # Let nginx into the group so it can connect to the chmod 0660 socket.
+      # No-op when nginx isn't enabled or when listening on TCP.
+      (mkIf (cfg.socketPath != null && config.services.nginx.enable) {
+        nginx.extraGroups = [cfg.group];
+      })
+    ];
 
     users.groups = mkIf (cfg.group == "shurbej") {
       shurbej = {};
