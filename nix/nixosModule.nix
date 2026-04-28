@@ -164,6 +164,10 @@ in {
         RuntimeDirectory = "shurbej";
         EnvironmentFile = cfg.cookieFile;
         ExecStart = "${cfg.package}/bin/shurbej foreground";
+        # RPCs init:stop() into the running node via the relx launcher, so
+        # applications stop in order and the node unregisters from epmd
+        # before exit. Falls through to SIGTERM if the RPC fails.
+        ExecStop = "${cfg.package}/bin/shurbej stop";
         Restart = "on-failure";
         RestartSec = 5;
 
