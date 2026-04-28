@@ -115,6 +115,17 @@ in
         --set-default RELX_REPLACE_OS_VARS true \
         --prefix PATH : ${lib.makeBinPath [coreutils gawk gnugrep gnused procps]}
 
+      # shurbej-admin: thin wrapper around `bin/shurbej eval` for
+      # admin one-shots (create users, list users, mint api keys, ...)
+      # without operators having to know about cookie sourcing or
+      # RELX_OUT_FILE_PATH isolation. Patches the script to use a
+      # frozen PATH so the inner shell has base64/readlink/mktemp.
+      install -m 0755 ${./shurbej-admin.sh} $out/bin/shurbej-admin
+      substituteInPlace $out/bin/shurbej-admin \
+        --replace-fail '#!/bin/sh' '#!${stdenv.shell}'
+      wrapProgram $out/bin/shurbej-admin \
+        --prefix PATH : ${lib.makeBinPath [coreutils]}
+
       runHook postInstall
     '';
 
