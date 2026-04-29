@@ -74,16 +74,24 @@ extract_api_key(Req) ->
             Key
     end.
 
-%% Authenticate only — verify the API key is valid, stash permissions.
+%% Authenticate only — verify the API key is valid, stash permissions and
+%% the user_id label (so library_obj/1 and lib_path_prefix/1 can emit the
+%% Zotero-API-shape integer label without a second DB hit).
+%%
+%% Returns {ok, UserUuid, Req} on success. Internal storage uses the
+%% UserUuid; the integer label is dict-stashed for output formatting only.
 authenticate(Req) ->
     case extract_api_key(Req) of
         undefined ->
             {error, Req};
         Key ->
             case shurbej_auth:key_info(Key) of
-                {ok, #{user_id := UserId, permissions := Perms}} ->
+                {ok, #{user_uuid := UserUuid, user_id := UserId,
+                       permissions := Perms}} ->
                     put(shurbej_perms, normalize_perms(Perms)),
-                    {ok, UserId, Req};
+                    put(shurbej_user_uuid, UserUuid),
+                    put(shurbej_user_id_label, UserId),
+                    {ok, UserUuid, Req};
                 {error, _} -> {error, Req}
             end
     end.
@@ -94,30 +102,34 @@ authenticate(Req) ->
 %% or the authenticated user's own library when no library scope is in URL.
 authorize(Req) ->
     case authenticate(Req) of
-        {ok, UserId, Req2} ->
-            case shurbej_rate_limit:check(UserId) of
+        {ok, UserUuid, Req2} ->
+            case shurbej_rate_limit:check(UserUuid) of
                 {error, rate_limited, Retry} ->
                     {error, {rate_limited, Retry}, Req2};
                 {backoff, Secs} ->
                     put(shurbej_backoff, Secs),
-                    authorize_path(UserId, Req2);
+                    authorize_path(UserUuid, Req2);
                 ok ->
-                    authorize_path(UserId, Req2)
+                    authorize_path(UserUuid, Req2)
             end;
         {error, Req2} ->
             {error, forbidden, Req2}
     end.
 
-authorize_path(UserId, Req) ->
+authorize_path(UserUuid, Req) ->
     case cowboy_req:binding(group_id, Req) of
         undefined ->
             case cowboy_req:binding(user_id, Req) of
                 undefined ->
                     %% Endpoints without any library binding (e.g., /schema).
-                    {ok, {user, UserId}, Req};
+                    {ok, {user, UserUuid}, Req};
                 UserIdBin ->
+                    %% URL :userID must match the authenticated user's
+                    %% current label. Internal storage is keyed by uuid; the
+                    %% URL integer is identification on the wire.
+                    Label = get(shurbej_user_id_label),
                     case safe_int(UserIdBin) of
-                        {ok, UserId} -> {ok, {user, UserId}, Req};
+                        {ok, Label} -> {ok, {user, UserUuid}, Req};
                         {ok, _Other} -> {error, forbidden, Req};
                         error -> {error, bad_request, Req}
                     end
@@ -131,7 +143,7 @@ authorize_path(UserId, Req) ->
                         {ok, _} ->
                             %% Stash caller's role (or `none` if not a member)
                             %% so check_lib_perm/2 can decide without re-reading.
-                            Role = case shurbej_db:get_group_member(GroupId, UserId) of
+                            Role = case shurbej_db:get_group_member(GroupId, UserUuid) of
                                 {ok, #shurbej_group_member{role = R}} -> R;
                                 undefined -> none
                             end,
@@ -142,21 +154,27 @@ authorize_path(UserId, Req) ->
             end
     end.
 
-%% Get the LibRef from the URL path bindings (safe).
-%% Returns {user, UserId} | {group, GroupId}.
+%% Get the LibRef from the URL path bindings (safe). For user libraries the
+%% returned ref carries the authenticated user's UserUuid (translated from
+%% the URL :userID label via the dict stash set in authenticate/1) so it can
+%% be used as a storage key directly.
 lib_ref(Req) ->
     case cowboy_req:binding(group_id, Req) of
         undefined ->
-            {ok, UserId} = safe_int(cowboy_req:binding(user_id, Req)),
-            {user, UserId};
+            %% URL :userID is the on-wire label; the storage key is uuid.
+            %% authorize/1 has already validated the label matches.
+            {user, get(shurbej_user_uuid)};
         GroupIdBin ->
             {ok, GroupId} = safe_int(GroupIdBin),
             {group, GroupId}
     end.
 
-%% URL path prefix for a library (e.g. /users/1 or /groups/42).
-lib_path_prefix({user, Id}) ->
-    <<"/users/", (integer_to_binary(Id))/binary>>;
+%% URL path prefix for a library (e.g. /users/1 or /groups/42). For user
+%% libraries the integer label is read from the dict (stashed at
+%% authenticate/1) — the LibRef itself carries the opaque uuid.
+lib_path_prefix({user, _UserUuid}) ->
+    Label = get(shurbej_user_id_label),
+    <<"/users/", (integer_to_binary(Label))/binary>>;
 lib_path_prefix({group, Id}) ->
     <<"/groups/", (integer_to_binary(Id))/binary>>.
 
@@ -633,8 +651,11 @@ maybe_backoff(Headers) ->
 base_url() ->
     to_binary(application:get_env(shurbej, base_url, <<"http://localhost:8080">>)).
 
-library_obj({user, Id}) ->
-    #{<<"type">> => <<"user">>, <<"id">> => Id};
+%% Emit the Zotero-API library object. For user libraries we expose the
+%% integer user_id label (read from the dict stash set in authenticate/1);
+%% the LibRef itself carries the opaque user_uuid storage key.
+library_obj({user, _UserUuid}) ->
+    #{<<"type">> => <<"user">>, <<"id">> => get(shurbej_user_id_label)};
 library_obj({group, Id}) ->
     #{<<"type">> => <<"group">>, <<"id">> => Id}.
 
@@ -703,10 +724,17 @@ envelope_search(LibRef, #shurbej_search{id = {_, _, Key}, version = Version, dat
 %% single-group endpoint (/groups/:id) and the per-user group listing
 %% (/users/:id/groups); keeping them unified means the shape can't drift.
 envelope_group(#shurbej_group{
-        group_id = Id, name = Name, owner_id = Owner, type = Type,
+        group_id = Id, name = Name, owner_uuid = OwnerUuid, type = Type,
         description = Desc, url = Url, has_image = HasImage,
         library_editing = LibEd, library_reading = LibRd, file_editing = FileEd,
         version = Version}) ->
+    %% Zotero protocol exposes group owner as integer userID. Translate the
+    %% internal owner_uuid to the owner's current user_id label; if the
+    %% record is missing (deleted user) emit 0 so the field type is stable.
+    Owner = case shurbej_db:get_user_by_uuid(OwnerUuid) of
+        {ok, #shurbej_user{user_id = OwnerId}} -> OwnerId;
+        undefined -> 0
+    end,
     Base = base_url(),
     IdBin = integer_to_binary(Id),
     GroupUrl = <<Base/binary, "/groups/", IdBin/binary>>,

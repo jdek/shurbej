@@ -28,9 +28,9 @@ websocket_init(#{api_key := ApiKey} = State) ->
             {reply, {text, Reply}, State#{subscriptions => #{}, single_key => false}};
         Key ->
             %% Single-key connection — auto-subscribe to user's library + groups
-            case shurbej_auth:verify(Key) of
-                {ok, UserId} ->
-                    Topics = allowed_topics(UserId),
+            case shurbej_auth:key_info(Key) of
+                {ok, #{user_uuid := UserUuid, user_id := UserId}} ->
+                    Topics = allowed_topics(UserUuid, UserId),
                     [pg:join(?SCOPE, T, self()) || T <- Topics],
                     Reply = simdjson:encode(#{
                         <<"event">> => <<"connected">>,
@@ -125,9 +125,9 @@ process_creates(Subs, State) ->
             undefined ->
                 {AccSubs, AccErrs, AccState};
             _ ->
-                case shurbej_auth:verify(Key) of
-                    {ok, UserId} ->
-                        Allowed = allowed_topics(UserId),
+                case shurbej_auth:key_info(Key) of
+                    {ok, #{user_uuid := UserUuid, user_id := UserId}} ->
+                        Allowed = allowed_topics(UserUuid, UserId),
                         Topics = case ReqTopics of
                             undefined -> Allowed;
                             T when is_list(T) ->
@@ -182,11 +182,13 @@ process_deletes(Subs, State) ->
 
 %% Topics the given user is allowed to subscribe to:
 %% their own /users/:id plus /groups/:id for every group they belong to.
-allowed_topics(UserId) ->
+%% UserUuid is the storage key (used for group membership lookup); UserId is
+%% the on-wire integer label that goes in the topic name.
+allowed_topics(UserUuid, UserId) ->
     UserTopic = <<"/users/", (integer_to_binary(UserId))/binary>>,
     GroupTopics = [group_topic(GroupId)
                    || #shurbej_group_member{id = {GroupId, _}}
-                      <- shurbej_db:list_user_groups(UserId)],
+                      <- shurbej_db:list_user_groups(UserUuid)],
     [UserTopic | GroupTopics].
 
 group_topic(GroupId) ->

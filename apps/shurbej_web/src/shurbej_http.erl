@@ -33,6 +33,10 @@ routes() ->
         %% JSON login for web UI
         {"/auth/login", shurbej_http_auth, #{}},
 
+        %% Account profile (shurbej-specific) — read/update userID label,
+        %% username, display name. Authenticated by API key.
+        {"/account", shurbej_http_account, #{}},
+
         %% WebSocket for login session notifications
         {"/ws", shurbej_ws_login, #{}},
 

@@ -7,7 +7,7 @@ init(Req0, State) ->
     case cowboy_req:method(Req0) of
         <<"GET">> ->
             case shurbej_http_common:authorize(Req0) of
-                {ok, {user, UserId}, _} -> handle_get(UserId, Req0, State);
+                {ok, {user, UserUuid}, _} -> handle_get(UserUuid, Req0, State);
                 {error, Reason, _} ->
                     Req = shurbej_http_common:auth_error_response(Reason, Req0),
                     {ok, Req, State}
@@ -18,8 +18,8 @@ init(Req0, State) ->
     end.
 
 %% GET /users/:user_id/groups — list groups the user is a member of.
-handle_get(UserId, Req0, State) ->
-    Memberships = shurbej_db:list_user_groups(UserId),
+handle_get(UserUuid, Req0, State) ->
+    Memberships = shurbej_db:list_user_groups(UserUuid),
     Groups = lists:filtermap(fun(#shurbej_group_member{id = {GroupId, _}}) ->
         case shurbej_db:get_group(GroupId) of
             {ok, Group} -> {true, Group};

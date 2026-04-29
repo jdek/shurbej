@@ -23,11 +23,13 @@ handle_login(Req0, State) ->
                         <<"Too many login attempts. Please wait a few minutes.">>, Req1),
                     {ok, Req, State};
                 ok ->
-                    case shurbej_db:authenticate_user(Username, Password) of
-                        {ok, UserId} ->
+                    case shurbej_db:authenticate_password(Username, Password) of
+                        {ok, UserUuid} ->
+                            {ok, #shurbej_user{user_id = UserId}} =
+                                shurbej_db:get_user_by_uuid(UserUuid),
                             shurbej_session:record_login_success(Username),
                             ApiKey = generate_api_key(),
-                            shurbej_db:create_key(ApiKey, UserId,
+                            shurbej_db:create_key(ApiKey, UserUuid,
                                 shurbej_http_common:normalize_perms(undefined)),
                             Body = #{
                                 <<"apiKey">> => ApiKey,

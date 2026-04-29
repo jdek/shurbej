@@ -5,8 +5,13 @@
 -export([
     %% Libraries
     get_library/1, ensure_library/1, update_library_version/2,
-    %% Users
-    create_user/3, authenticate_user/2, get_user/1, get_user_by_id/1, delete_key/1,
+    %% Users / identities
+    create_user/2, create_user/3,
+    authenticate_password/2,
+    get_user_by_uuid/1, get_user_by_username/1, find_users_by_user_id/1,
+    set_user_id/2, set_username/2, set_display_name/2,
+    link_identity/4, unlink_identity/1, get_identity/1,
+    delete_user/1, delete_key/1,
     hash_password/2,
     %% API keys
     verify_key/1, get_key_info/1, create_key/3, has_any_key/0,
@@ -67,36 +72,56 @@ update_library_version(LibRef, NewVersion) ->
     db_write(#shurbej_library{ref = LibRef, version = NewVersion}).
 
 %% ===================================================================
-%% Users
+%% Users / identities
 %% ===================================================================
 
+%% create_user/2 — fresh user with a password binding. user_uuid is allocated
+%% randomly; the user_id label is derived from the uuid so /keys/current has
+%% something stable to return before the user picks their preferred label.
+%% Returns {ok, UserUuid}.
+create_user(Username, Password) ->
+    create_user(Username, Password, default_user_id(Username)).
+
 create_user(Username, Password, UserId) ->
+    UserUuid = new_user_uuid(),
     Salt = crypto:strong_rand_bytes(16),
     Hash = hash_password(Password, Salt),
+    Now = erlang:system_time(second),
     {atomic, ok} = mnesia:transaction(fun() ->
         mnesia:write(#shurbej_user{
+            user_uuid = UserUuid,
+            user_id = UserId,
             username = Username,
-            password_hash = Hash,
-            salt = Salt,
-            user_id = UserId
+            display_name = Username,
+            created_at = Now
         }),
-        LibRef = {user, UserId},
+        mnesia:write(#shurbej_identity{
+            key = {password, Username},
+            user_uuid = UserUuid,
+            credentials = {pbkdf2_sha256, Hash, Salt}
+        }),
+        LibRef = {user, UserUuid},
         case mnesia:read(shurbej_library, LibRef) of
             [] -> mnesia:write(#shurbej_library{ref = LibRef, version = 0});
             _ -> ok
         end
     end),
-    ok.
+    {ok, UserUuid}.
 
-authenticate_user(Username, Password) ->
-    case db_read(shurbej_user, Username) of
-        [#shurbej_user{password_hash = Hash, salt = Salt, user_id = UserId}] ->
+%% Verify a password identity. The not-found path runs a dummy PBKDF2 with a
+%% throwaway salt so a missing-user response can't be timing-distinguished
+%% from a wrong-password one.
+authenticate_password(Username, Password) ->
+    case db_read(shurbej_identity, {password, Username}) of
+        [#shurbej_identity{
+                user_uuid = UserUuid,
+                credentials = {pbkdf2_sha256, Hash, Salt}}] ->
             Computed = hash_password(Password, Salt),
             case constant_time_compare(Computed, Hash) of
-                true -> {ok, UserId};
+                true -> {ok, UserUuid};
                 false -> {error, invalid}
             end;
-        [] ->
+        _ ->
             _Dummy = hash_password(Password, crypto:strong_rand_bytes(16)),
             {error, invalid}
     end.
@@ -112,19 +137,103 @@ constant_time_compare(<<A, RestA/binary>>, <<B, RestB/binary>>, Acc) ->
 constant_time_compare(<<>>, <<>>, 0) -> true;
 constant_time_compare(<<>>, <<>>, _) -> false.
 
-get_user(Username) ->
-    case db_read(shurbej_user, Username) of
+get_user_by_uuid(UserUuid) ->
+    case db_read(shurbej_user, UserUuid) of
         [User] -> {ok, User};
         [] -> undefined
     end.
 
-get_user_by_id(UserId) ->
-    MS = ets:fun2ms(
-        fun(#shurbej_user{user_id = Id} = U) when Id =:= UserId -> U end),
-    case mnesia:dirty_select(shurbej_user, MS) of
+%% Username is an indexed secondary field on shurbej_user. Returns the first
+%% match; usernames are not strictly unique-constrained server-side but the
+%% admin/login paths only ever create one user per username.
+get_user_by_username(Username) ->
+    case db_index_read(shurbej_user, Username, #shurbej_user.username) of
         [User | _] -> {ok, User};
         [] -> undefined
     end.
+
+%% user_id is a non-unique label, so this returns a list. Used by tooling that
+%% wants to find "all users currently advertising label N" — not by request
+%% routing (which compares URL :userID against the authenticated user's
+%% label, not the other way around).
+find_users_by_user_id(UserId) ->
+    db_index_read(shurbej_user, UserId, #shurbej_user.user_id).
+
+set_user_id(UserUuid, NewUserId) when is_integer(NewUserId), NewUserId >= 0 ->
+    Result = update_user_field(UserUuid,
+        fun(U) -> U#shurbej_user{user_id = NewUserId} end),
+    %% The version gen_server caches the pubsub topic string, which embeds
+    %% the user_id label. Bounce the worker so its next start picks up the
+    %% new label. ensure_started in shurbej_version:call/2 spawns a fresh
+    %% one transparently on the next request.
+    case Result of
+        ok -> shurbej_version_sup:terminate_child({user, UserUuid});
+        _ -> ok
+    end,
+    Result.
+
+set_username(UserUuid, NewUsername) when is_binary(NewUsername) ->
+    update_user_field(UserUuid, fun(U) -> U#shurbej_user{username = NewUsername} end).
+
+set_display_name(UserUuid, NewDisplay) ->
+    update_user_field(UserUuid,
+        fun(U) -> U#shurbej_user{display_name = NewDisplay} end).
+
+update_user_field(UserUuid, F) ->
+    {atomic, Result} = mnesia:transaction(fun() ->
+        case mnesia:read(shurbej_user, UserUuid, write) of
+            [User] -> mnesia:write(F(User)), ok;
+            [] -> {error, not_found}
+        end
+    end),
+    Result.
+
+%% Add (or replace) an authentication binding. Subjects are scoped per
+%% provider — `{password, "alice"}` and `{oidc_kanidm, "alice"}` are
+%% disjoint. Replacing an existing row with a different user_uuid is allowed
+%% and is the natural semantics for "rebind this OIDC subject to a different
+%% local account".
+link_identity(UserUuid, Provider, Subject, Credentials)
+        when is_binary(UserUuid), is_atom(Provider), is_binary(Subject) ->
+    db_write(#shurbej_identity{
+        key = {Provider, Subject},
+        user_uuid = UserUuid,
+        credentials = Credentials
+    }),
+    ok.
+
+unlink_identity({Provider, Subject} = Key)
+        when is_atom(Provider), is_binary(Subject) ->
+    db_delete({shurbej_identity, Key}).
+
+get_identity({Provider, Subject} = Key)
+        when is_atom(Provider), is_binary(Subject) ->
+    case db_read(shurbej_identity, Key) of
+        [Ident] -> {ok, Ident};
+        [] -> undefined
+    end.
+
+delete_user(UserUuid) when is_binary(UserUuid) ->
+    {atomic, ok} = mnesia:transaction(fun() ->
+        IdentMS = ets:fun2ms(
+            fun(#shurbej_identity{user_uuid = U} = I) when U =:= UserUuid -> I end),
+        [mnesia:delete_object(I) || I <- mnesia:select(shurbej_identity, IdentMS)],
+        mnesia:delete({shurbej_user, UserUuid}),
+        ok
+    end),
+    ok.
+
+%% UUID generation — 16 random bytes hex-encoded for shell-friendliness.
+new_user_uuid() ->
+    binary:encode_hex(crypto:strong_rand_bytes(16), lowercase).
+
+%% Default user_id label derived from the username. We want it stable per
+%% user, fitting in an int32 (Zotero clients store it as INTEGER PRIMARY
+%% KEY), and unlikely to collide with an existing zotero.org user_id the
+%% admin might want to claim later. phash2/2 with 1 bsl 31 gives 0..2^31-1
+%% which is the safe int32 range.
+default_user_id(Subject) ->
+    erlang:phash2(Subject, 1 bsl 31).
 
 hash_password(Password, Salt) ->
     {ok, DK} = pbkdf2(Password, Salt, 100000, 32),
@@ -146,23 +255,39 @@ pbkdf2_loop(Password, U, Acc, N) ->
 
 verify_key(Key) when is_binary(Key) ->
     case db_read(shurbej_api_key, hash_api_key(Key)) of
-        [#shurbej_api_key{user_id = UserId}] -> {ok, UserId};
+        [#shurbej_api_key{user_uuid = UserUuid}] -> {ok, UserUuid};
         [] -> {error, invalid}
     end;
 verify_key(_) ->
     {error, invalid}.
 
+%% Return the auth context for an API key: the internal user_uuid, the user's
+%% current user_id label and username (joined from shurbej_user so callers
+%% don't double-fetch), and the permission map. Stable shape across password
+%% and OIDC-backed keys.
 get_key_info(Key) ->
     case db_read(shurbej_api_key, hash_api_key(Key)) of
-        [#shurbej_api_key{user_id = UserId, permissions = Perms}] ->
-            {ok, #{user_id => UserId, permissions => Perms}};
+        [#shurbej_api_key{user_uuid = UserUuid, permissions = Perms}] ->
+            case db_read(shurbej_user, UserUuid) of
+                [#shurbej_user{user_id = UserId, username = Username,
+                               display_name = DisplayName}] ->
+                    {ok, #{
+                        user_uuid => UserUuid,
+                        user_id => UserId,
+                        username => Username,
+                        display_name => DisplayName,
+                        permissions => Perms
+                    }};
+                [] ->
+                    {error, invalid}
+            end;
         [] ->
             {error, invalid}
     end.
 
-create_key(Key, UserId, Permissions) ->
+create_key(Key, UserUuid, Permissions) ->
     db_write(#shurbej_api_key{
-        key = hash_api_key(Key), user_id = UserId, permissions = Permissions
+        key = hash_api_key(Key), user_uuid = UserUuid, permissions = Permissions
     }).
 
 has_any_key() ->
@@ -685,14 +810,17 @@ blob_unref_tx(Hash) ->
             0
     end.
 
-add_group_member(GroupId, UserId, Role) ->
-    db_write(#shurbej_group_member{id = {GroupId, UserId}, role = Role}).
+add_group_member(GroupId, UserUuid, Role)
+        when is_integer(GroupId), is_binary(UserUuid) ->
+    db_write(#shurbej_group_member{id = {GroupId, UserUuid}, role = Role}).
 
-remove_group_member(GroupId, UserId) ->
-    db_delete({shurbej_group_member, {GroupId, UserId}}).
+remove_group_member(GroupId, UserUuid)
+        when is_integer(GroupId), is_binary(UserUuid) ->
+    db_delete({shurbej_group_member, {GroupId, UserUuid}}).
 
-get_group_member(GroupId, UserId) ->
-    case db_read(shurbej_group_member, {GroupId, UserId}) of
+get_group_member(GroupId, UserUuid)
+        when is_integer(GroupId), is_binary(UserUuid) ->
+    case db_read(shurbej_group_member, {GroupId, UserUuid}) of
         [Member] -> {ok, Member};
         [] -> undefined
     end.
@@ -702,9 +830,9 @@ list_group_members(GroupId) ->
         fun(#shurbej_group_member{id = {G, _}} = M) when G =:= GroupId -> M end),
     mnesia:dirty_select(shurbej_group_member, MS).
 
-list_user_groups(UserId) ->
+list_user_groups(UserUuid) when is_binary(UserUuid) ->
     MS = ets:fun2ms(
-        fun(#shurbej_group_member{id = {_, U}} = M) when U =:= UserId -> M end),
+        fun(#shurbej_group_member{id = {_, U}} = M) when U =:= UserUuid -> M end),
     mnesia:dirty_select(shurbej_group_member, MS).
 
 %% ===================================================================

@@ -48,18 +48,16 @@ handle_get_current(Req0, State) ->
             {ok, Req, State};
         Key ->
             case shurbej_auth:key_info(Key) of
-                {ok, #{user_id := UserId, permissions := RawPerms}} ->
-                    Username = case shurbej_db:get_user_by_id(UserId) of
-                        {ok, #shurbej_user{username = U}} -> U;
-                        undefined -> <<"unknown">>
-                    end,
+                {ok, #{user_uuid := UserUuid, user_id := UserId,
+                       username := Username, display_name := Display,
+                       permissions := RawPerms}} ->
                     Body = #{
                         <<"userID">> => UserId,
                         <<"username">> => Username,
-                        <<"displayName">> => Username,
+                        <<"displayName">> => display_or(Display, Username),
                         <<"access">> => format_access(RawPerms)
                     },
-                    {ok, Version} = shurbej_version:get({user, UserId}),
+                    {ok, Version} = shurbej_version:get({user, UserUuid}),
                     Req = shurbej_http_common:json_response(200, Body, Version, Req0),
                     {ok, Req, State};
                 {error, invalid} ->
@@ -147,20 +145,18 @@ handle_get_by_key(Req0, State) ->
             Req = shurbej_http_common:error_response(Code, Msg, Req0),
             {ok, Req, State};
         ok ->
-            {ok, #{user_id := UserId, permissions := RawPerms}} =
+            {ok, #{user_uuid := UserUuid, user_id := UserId,
+                   username := Username, display_name := Display,
+                   permissions := RawPerms}} =
                 shurbej_auth:key_info(UrlKey),
-            Username = case shurbej_db:get_user_by_id(UserId) of
-                {ok, #shurbej_user{username = U}} -> U;
-                undefined -> <<"unknown">>
-            end,
             Body = #{
                 <<"key">> => UrlKey,
                 <<"userID">> => UserId,
                 <<"username">> => Username,
-                <<"displayName">> => Username,
+                <<"displayName">> => display_or(Display, Username),
                 <<"access">> => format_access(RawPerms)
             },
-            {ok, Version} = shurbej_version:get({user, UserId}),
+            {ok, Version} = shurbej_version:get({user, UserUuid}),
             Req = shurbej_http_common:json_response(200, Body, Version, Req0),
             {ok, Req, State}
     end.
@@ -212,18 +208,22 @@ handle_create_key(Req0, State) ->
                                 <<"Too many login attempts. Please wait a few minutes.">>, Req1),
                             {ok, Req, State};
                         ok ->
-                            case shurbej_db:authenticate_user(Username, Password) of
-                                {ok, UserId} ->
+                            case shurbej_db:authenticate_password(Username, Password) of
+                                {ok, UserUuid} ->
+                                    {ok, #shurbej_user{
+                                        user_id = UserId,
+                                        display_name = Display}} =
+                                        shurbej_db:get_user_by_uuid(UserUuid),
                                     shurbej_session:record_login_success(Username),
                                     Perms = parse_access_or_default(
                                         maps:get(<<"access">>, Body, undefined)),
                                     ApiKey = generate_api_key(),
-                                    shurbej_db:create_key(ApiKey, UserId, Perms),
+                                    shurbej_db:create_key(ApiKey, UserUuid, Perms),
                                     RespBody = #{
                                         <<"key">> => ApiKey,
                                         <<"userID">> => UserId,
                                         <<"username">> => Username,
-                                        <<"displayName">> => Username,
+                                        <<"displayName">> => display_or(Display, Username),
                                         <<"name">> => Name,
                                         <<"access">> => format_access(Perms)
                                     },
@@ -325,3 +325,7 @@ format_groups_bucket(_) -> #{}.
 format_group_key(all) -> <<"all">>;
 format_group_key(N) when is_integer(N) -> integer_to_binary(N);
 format_group_key(B) when is_binary(B) -> B.
+
+display_or(undefined, Fallback) -> Fallback;
+display_or(<<>>, Fallback) -> Fallback;
+display_or(Display, _) -> Display.

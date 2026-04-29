@@ -75,13 +75,19 @@ handle_post_body(Body, Req1, State) ->
                                                   Html, Req1),
                             {ok, Req, State};
                         ok ->
-                            case shurbej_db:authenticate_user(Username, Password) of
-                                {ok, UserId} ->
+                            case shurbej_db:authenticate_password(Username, Password) of
+                                {ok, UserUuid} ->
+                                    {ok, #shurbej_user{
+                                        user_id = UserId,
+                                        display_name = DisplayName}} =
+                                        shurbej_db:get_user_by_uuid(UserUuid),
                                     shurbej_session:record_login_success(Username),
                                     ApiKey = generate_api_key(),
-                                    shurbej_db:create_key(ApiKey, UserId,
+                                    shurbej_db:create_key(ApiKey, UserUuid,
                                         shurbej_http_common:normalize_perms(undefined)),
-                                    UserInfo = #{user_id => UserId, username => Username, display_name => Username},
+                                    UserInfo = #{user_id => UserId,
+                                                 username => Username,
+                                                 display_name => display_or(DisplayName, Username)},
                                     ok = shurbej_session:complete(Token, ApiKey, UserInfo),
                                     Req = cowboy_req:reply(200,
                                         ?HTML_HEADERS,
@@ -106,6 +112,10 @@ handle_post_body(Body, Req1, State) ->
 %% Internal — key generation (256 bits)
 generate_api_key() ->
     binary:encode_hex(crypto:strong_rand_bytes(32), lowercase).
+
+display_or(undefined, Fallback) -> Fallback;
+display_or(<<>>, Fallback) -> Fallback;
+display_or(Display, _) -> Display.
 
 %% HTML escaping to prevent XSS
 html_escape(Bin) ->

@@ -25,7 +25,14 @@ init(LibRef) ->
     ok = shurbej_db:ensure_library(LibRef),
     case shurbej_db:get_library(LibRef) of
         {ok, #shurbej_library{version = Version}} ->
-            {ok, #{lib_ref => LibRef, version => Version}};
+            %% The pubsub topic depends on the user's current user_id label
+            %% (Zotero clients parse `/users/:userID` topic strings back into
+            %% libraries — see streamer.js getPathLibrary). The label can
+            %% only change via /account, which terminates this worker so a
+            %% fresh init/1 picks up the new value. Keeping it cached here
+            %% means writes don't pay a per-write DB hop just to publish.
+            Topic = build_topic(LibRef),
+            {ok, #{lib_ref => LibRef, version => Version, topic => Topic}};
         undefined ->
             {stop, {unknown_library, LibRef}}
     end.
@@ -55,7 +62,7 @@ handle_cast(_Msg, State) ->
 
 %% Internal
 
-do_write(LibRef, Current, WriteFun, State) ->
+do_write(LibRef, Current, WriteFun, #{topic := Topic} = State) ->
     NewVersion = Current + 1,
     %% Clear any leftover orphan-blob entries from a prior run so aborts
     %% from that run can't pollute this one.
@@ -73,8 +80,7 @@ do_write(LibRef, Current, WriteFun, State) ->
         {atomic, ok} ->
             %% Transaction committed — safe to unlink freed blobs now.
             shurbej_db:reap_orphan_blobs(),
-            %% Notify stream subscribers via pg (no compile-time dependency)
-            Topic = topic(LibRef),
+            %% Notify stream subscribers via pg (no compile-time dependency).
             try
                 Members = pg:get_members(shurbej_stream, Topic),
                 [Pid ! {topic_updated, Topic, NewVersion} || Pid <- Members]
@@ -89,9 +95,16 @@ do_write(LibRef, Current, WriteFun, State) ->
             {reply, {error, Reason}, State}
     end.
 
-topic({user, Id}) ->
-    <<"/users/", (integer_to_binary(Id))/binary>>;
-topic({group, Id}) ->
+%% Resolve the on-wire path that Zotero clients use as a topic identifier:
+%% `/users/:userID` for user libraries (where userID is the integer label,
+%% not the storage uuid) and `/groups/:groupID` for groups.
+build_topic({user, UserUuid}) ->
+    Label = case shurbej_db:get_user_by_uuid(UserUuid) of
+        {ok, #shurbej_user{user_id = Id}} -> Id;
+        undefined -> 0
+    end,
+    <<"/users/", (integer_to_binary(Label))/binary>>;
+build_topic({group, Id}) ->
     <<"/groups/", (integer_to_binary(Id))/binary>>.
 
 call(LibRef, Msg) ->

@@ -1,6 +1,7 @@
 -module(shurbej_sync_SUITE).
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
+-include_lib("shurbej_store/include/shurbej_records.hrl").
 
 -export([
     all/0,
@@ -524,12 +525,15 @@ init_per_suite(Config) ->
     application:set_env(shurbej, file_storage_path, "/tmp/shurbej_test_files"),
     application:set_env(shurbej, base_url, "http://localhost:18080"),
     {ok, _} = application:ensure_all_started(shurbej),
-    %% Create a test user and API key
-    ok = shurbej_admin:create_user(<<"testuser">>, <<"testpass">>, 1),
+    %% Create a test user and API key. user_id label is fixed at 1 so the
+    %% existing assertions on `userID == 1` keep working; the storage uuid
+    %% is opaque and only used internally.
+    {ok, UserUuid} = shurbej_admin:create_user(<<"testuser">>, <<"testpass">>, 1),
     ApiKey = crypto:strong_rand_bytes(12),
     ApiKeyHex = hex_bytes(ApiKey),
-    shurbej_db:create_key(ApiKeyHex, 1, shurbej_http_common:normalize_perms(undefined)),
-    [{api_key, ApiKeyHex}, {mnesia_dir, MnesiaDir}, {base, "http://localhost:18080"} | Config].
+    shurbej_db:create_key(ApiKeyHex, UserUuid, shurbej_http_common:normalize_perms(undefined)),
+    [{api_key, ApiKeyHex}, {user_uuid, UserUuid}, {mnesia_dir, MnesiaDir},
+     {base, "http://localhost:18080"} | Config].
 
 end_per_suite(Config) ->
     application:stop(shurbej),
@@ -649,7 +653,7 @@ items_delete(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"To Delete">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     {404, _, _} = get_json("/users/1/items/" ++ binary_to_list(Key), Config),
     ok.
@@ -699,7 +703,7 @@ collections_crud(Config) ->
     case Key of
         undefined -> ok;
         _ ->
-            {ok, Version} = shurbej_version:get({user, 1}),
+            {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
             {204, _, _} = delete_req("/users/1/collections?collectionKey=" ++ binary_to_list(Key), Version, Config)
     end,
     ok.
@@ -752,7 +756,7 @@ deleted_tracking(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Will Delete">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     DeletedItems = maps:get(<<"items">>, Deleted),
@@ -810,7 +814,7 @@ items_scope_trash(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Trashed Book">>},
     {200, _, CBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CBody),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% /items/trash should contain the deleted item
     {200, _, TrashItems} = get_json("/users/1/items/trash", Config),
@@ -978,9 +982,11 @@ items_native_terms(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Native Term Test">>},
     {200, _, CreateBody} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CreateBody),
-    %% Read directly from Mnesia
-    [{shurbej_item, {user, 1, Key}, _Version, Data, false, _ParentKey}] =
-        mnesia:dirty_read(shurbej_item, {user, 1, Key}),
+    %% Read directly from Mnesia. Storage key is {user, UserUuid, ItemKey};
+    %% the URL-side integer label is unrelated to the on-disk shape.
+    UserUuid = ?config(user_uuid, Config),
+    [{shurbej_item, {user, UserUuid, Key}, _Version, Data, false, _ParentKey}] =
+        mnesia:dirty_read(shurbej_item, {user, UserUuid, Key}),
     %% Data should be a map, not a binary/string
     ?assert(is_map(Data)),
     ?assertEqual(<<"Native Term Test">>, maps:get(<<"title">>, Data)),
@@ -1301,7 +1307,8 @@ delete_key_revokes(Config) ->
     Base = ?config(base, Config),
     %% Create a temporary key
     TmpKey = hex_bytes(crypto:strong_rand_bytes(12)),
-    shurbej_db:create_key(TmpKey, 1, shurbej_http_common:normalize_perms(undefined)),
+    shurbej_db:create_key(TmpKey, ?config(user_uuid, Config),
+        shurbej_http_common:normalize_perms(undefined)),
     %% Verify it works
     {ok, {{_, 200, _}, _, _}} =
         httpc:request(get, {Base ++ "/keys/current",
@@ -1327,7 +1334,7 @@ item_put_update(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Put Original">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {200, _, Got} = put_json_versioned("/users/1/items/" ++ binary_to_list(Key),
         #{<<"itemType">> => <<"book">>, <<"title">> => <<"Put Replaced">>}, Version, Config),
     ?assertEqual(<<"Put Replaced">>, maps:get(<<"title">>, maps:get(<<"data">>, Got))),
@@ -1337,7 +1344,7 @@ item_patch_merge(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Patch Original">>, <<"date">> => <<"2024">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {200, _, Got} = patch_json("/users/1/items/" ++ binary_to_list(Key),
         #{<<"title">> => <<"Patch Merged">>}, Version, Config),
     Data = maps:get(<<"data">>, Got),
@@ -1349,7 +1356,7 @@ collection_patch(Config) ->
     Coll = #{<<"name">> => <<"Patch Coll">>},
     {200, _, CB} = post_json("/users/1/collections", [Coll], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {200, _, Got} = patch_json("/users/1/collections/" ++ binary_to_list(Key),
         #{<<"name">> => <<"Patched Name">>}, Version, Config),
     ?assertEqual(<<"Patched Name">>, maps:get(<<"name">>, maps:get(<<"data">>, Got))),
@@ -1359,7 +1366,7 @@ search_patch(Config) ->
     Search = #{<<"name">> => <<"Patch Search">>, <<"conditions">> => []},
     {200, _, CB} = post_json("/users/1/searches", [Search], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {200, _, Got} = patch_json("/users/1/searches/" ++ binary_to_list(Key),
         #{<<"name">> => <<"Patched Search">>}, Version, Config),
     ?assertEqual(<<"Patched Search">>, maps:get(<<"name">>, maps:get(<<"data">>, Got))),
@@ -1471,7 +1478,7 @@ include_trashed(Config) ->
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Include Trashed Test">>},
     {200, _, CB} = post_json("/users/1/items", [Item], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% Without includeTrashed — should not appear
     {200, _, Without} = get_json("/users/1/items?since=0&limit=100", Config),
@@ -1608,10 +1615,10 @@ export_format_rejected(Config) ->
 %% ===================================================================
 
 admin_list_delete_user(_Config) ->
-    ok = shurbej_admin:create_user(<<"tempuser">>, <<"temppass">>, 99),
+    {ok, _Uuid} = shurbej_admin:create_user(<<"tempuser">>, <<"temppass">>, 99),
     Users = shurbej_admin:list_users(),
     ?assert(lists:keymember(<<"tempuser">>, 1, Users)),
-    shurbej_admin:delete_user(<<"tempuser">>),
+    ok = shurbej_admin:delete_user(<<"tempuser">>),
     Users2 = shurbej_admin:list_users(),
     ?assertNot(lists:keymember(<<"tempuser">>, 1, Users2)),
     ok.
@@ -1715,7 +1722,7 @@ collections_delete(Config) ->
     Coll = #{<<"name">> => <<"Del Coll">>},
     {200, _, CB} = post_json("/users/1/collections", [Coll], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/collections?collectionKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     ?assert(lists:member(Key, maps:get(<<"collections">>, Deleted))),
@@ -1725,7 +1732,7 @@ searches_delete(Config) ->
     Search = #{<<"name">> => <<"Del Search">>, <<"conditions">> => []},
     {200, _, CB} = post_json("/users/1/searches", [Search], Config),
     #{<<"0">> := #{<<"key">> := Key}} = maps:get(<<"successful">>, CB),
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/searches?searchKey=" ++ binary_to_list(Key), Version, Config),
     {200, _, Deleted} = get_json("/users/1/deleted?since=0", Config),
     ?assert(lists:member(Key, maps:get(<<"searches">>, Deleted))),
@@ -1970,12 +1977,12 @@ file_cascade_delete(Config) ->
     {204, _, _} = put_json("/users/1/items/" ++ binary_to_list(Key) ++ "/fulltext",
         #{<<"content">> => <<"test">>}, Config),
     %% Now delete the item
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {204, _, _} = delete_req("/users/1/items?itemKey=" ++ binary_to_list(Key), Version, Config),
     %% File metadata should be gone
-    ?assertEqual(undefined, shurbej_db:get_file_meta({user, 1}, Key)),
+    ?assertEqual(undefined, shurbej_db:get_file_meta({user, ?config(user_uuid, Config)}, Key)),
     %% Fulltext should be gone
-    ?assertEqual(undefined, shurbej_db:get_fulltext({user, 1}, Key)),
+    ?assertEqual(undefined, shurbej_db:get_fulltext({user, ?config(user_uuid, Config)}, Key)),
     ok.
 
 %% ===================================================================
@@ -2098,7 +2105,7 @@ item_template_attachment(Config) ->
     ok.
 
 put_nonexistent_item(Config) ->
-    {ok, Version} = shurbej_version:get({user, 1}),
+    {ok, Version} = shurbej_version:get({user, ?config(user_uuid, Config)}),
     {404, _, _} = put_json_versioned("/users/1/items/ZZZZZZZZ",
         #{<<"itemType">> => <<"book">>, <<"title">> => <<"Ghost">>}, Version, Config),
     ok.
@@ -2718,7 +2725,7 @@ group_member_blocked_admin_only(Config) ->
     {GroupId, _OwnerId, _OwnerKey} = mk_group(#{
         library_editing => admins, library_reading => members, file_editing => admins
     }),
-    {MemberId, MemberKey} = mk_user(full),
+    {MemberId, _, _, MemberKey} = mk_user(full),
     ok = shurbej_admin:add_member(GroupId, MemberId, member),
     Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Member wrote">>},
@@ -2731,7 +2738,7 @@ group_member_writes_members_editing(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => members
     }),
-    {MemberId, MemberKey} = mk_user(full),
+    {MemberId, _, _, MemberKey} = mk_user(full),
     ok = shurbej_admin:add_member(GroupId, MemberId, member),
     Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
     Item = #{<<"itemType">> => <<"book">>, <<"title">> => <<"Member OK">>},
@@ -2744,7 +2751,7 @@ group_nonmember_blocked_private_read(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => members
     }),
-    {_Uid, NMKey} = mk_user(full),
+    {_, _, _, NMKey} = mk_user(full),
     Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
     {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
     ?assertEqual(403, Status),
@@ -2754,7 +2761,7 @@ group_nonmember_reads_public(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => admins, library_reading => all, file_editing => admins
     }),
-    {_Uid, NMKey} = mk_user(full),
+    {_, _, _, NMKey} = mk_user(full),
     Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items",
     {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
     ?assertEqual(200, Status),
@@ -2764,7 +2771,7 @@ group_file_editing_none_blocks_upload(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => none
     }),
-    {MemberId, MemberKey} = mk_user(full),
+    {MemberId, _, _, MemberKey} = mk_user(full),
     ok = shurbej_admin:add_member(GroupId, MemberId, member),
     Path = "/groups/" ++ integer_to_list(GroupId) ++ "/items/ZZZZZZZZ/file",
     Md5 = <<"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">>,
@@ -2780,7 +2787,7 @@ key_without_group_grant_blocks(Config) ->
         library_editing => members, library_reading => members, file_editing => members
     }),
     %% Key with no groups bucket at all — should be rejected even for members.
-    {MemberId, MemberKey} = mk_user(#{
+    {MemberId, _, _, MemberKey} = mk_user(#{
         user => #{library => true, write => true, files => false, notes => false},
         groups => #{}
     }),
@@ -2794,7 +2801,7 @@ key_with_groups_all_works(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => members
     }),
-    {MemberId, MemberKey} = mk_user(#{
+    {MemberId, _, _, MemberKey} = mk_user(#{
         user => #{library => true, write => true, files => true, notes => true},
         groups => #{all => #{library => true, write => true}}
     }),
@@ -2823,7 +2830,7 @@ group_metadata_get_ok(Config) ->
     ok.
 
 group_metadata_get_404(Config) ->
-    {_Uid, Key} = mk_user(full),
+    {_, _, _, Key} = mk_user(full),
     %% Use a group id that cannot exist. list_groups/0 returns all groups so
     %% pick max+1.
     NextId = case shurbej_admin:list_groups() of
@@ -2850,19 +2857,19 @@ group_metadata_get_403_private_nonmember(Config) ->
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => admins
     }),
-    {_Uid, NMKey} = mk_user(full),
+    {_, _, _, NMKey} = mk_user(full),
     Path = "/groups/" ++ integer_to_list(GroupId),
     {Status, _} = request_with_key(get, Path, [], <<>>, Config, NMKey),
     ?assertEqual(403, Status),
     ok.
 
 groups_list_with_memberships(Config) ->
-    {Uid, Key} = mk_user(full),
+    {Name, Uid, _, Key} = mk_user(full),
     %% Add the user to a fresh group (not as owner) so the list is non-empty.
     {GroupId, _OwnerId, _OwnerKey} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => members
     }),
-    ok = shurbej_admin:add_member(GroupId, Uid, member),
+    ok = shurbej_admin:add_member(GroupId, Name, member),
     Path = "/users/" ++ integer_to_list(Uid) ++ "/groups",
     {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
     ?assert(is_list(Body)),
@@ -2871,11 +2878,11 @@ groups_list_with_memberships(Config) ->
     ok.
 
 groups_list_versions_populated(Config) ->
-    {Uid, Key} = mk_user(full),
+    {Name, Uid, _, Key} = mk_user(full),
     {GroupId, _, _} = mk_group(#{
         library_editing => members, library_reading => members, file_editing => members
     }),
-    ok = shurbej_admin:add_member(GroupId, Uid, member),
+    ok = shurbej_admin:add_member(GroupId, Name, member),
     Path = "/users/" ++ integer_to_list(Uid) ++ "/groups?format=versions",
     {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
     ?assert(maps:is_key(integer_to_binary(GroupId), Body)),
@@ -2890,7 +2897,7 @@ keys_create_with_custom_access(Config) ->
     Uniq = integer_to_binary(erlang:unique_integer([positive])),
     Username = <<"keyuser_", Uniq/binary>>,
     Password = <<"pw_", Uniq/binary>>,
-    ok = shurbej_admin:create_user(Username, Password),
+    {ok, _} = shurbej_admin:create_user(Username, Password),
     Body = #{
         <<"username">> => Username,
         <<"password">> => Password,
@@ -2913,7 +2920,7 @@ keys_create_with_custom_access(Config) ->
     ok.
 
 keys_get_by_key_returns_access(Config) ->
-    {_Uid, Key} = mk_user(full),
+    {_, _, _, Key} = mk_user(full),
     Path = "/keys/" ++ binary_to_list(Key),
     {200, Body} = request_with_key(get, Path, [], <<>>, Config, Key),
     ?assertEqual(Key, maps:get(<<"key">>, Body)),
@@ -2921,8 +2928,8 @@ keys_get_by_key_returns_access(Config) ->
     ok.
 
 keys_get_by_key_cross_user_blocked(Config) ->
-    {_Uid1, KeyA} = mk_user(full),
-    {_Uid2, KeyB} = mk_user(full),
+    {_, _, _, KeyA} = mk_user(full),
+    {_, _, _, KeyB} = mk_user(full),
     %% Caller authenticates with KeyA but asks about KeyB — must 403.
     Path = "/keys/" ++ binary_to_list(KeyB),
     {Status, _} = request_with_key(get, Path, [], <<>>, Config, KeyA),
@@ -2930,7 +2937,7 @@ keys_get_by_key_cross_user_blocked(Config) ->
     ok.
 
 keys_get_by_key_unauthenticated_blocked(Config) ->
-    {_Uid, Key} = mk_user(full),
+    {_, _, _, Key} = mk_user(full),
     Base = ?config(base, Config),
     %% No auth header at all.
     {ok, {{_, Status, _}, _, _}} =
@@ -2940,8 +2947,8 @@ keys_get_by_key_unauthenticated_blocked(Config) ->
     ok.
 
 keys_delete_by_key_cross_user_blocked(Config) ->
-    {_Uid1, KeyA} = mk_user(full),
-    {_Uid2, KeyB} = mk_user(full),
+    {_, _, _, KeyA} = mk_user(full),
+    {_, _, _, KeyB} = mk_user(full),
     Path = "/keys/" ++ binary_to_list(KeyB),
     {Status, _} = request_with_key(delete, Path, [], <<>>, Config, KeyA),
     ?assertEqual(403, Status),
@@ -3079,41 +3086,43 @@ files_upload_body_too_large(Config) ->
 %% ===================================================================
 
 admin_group_bad_type(_Config) ->
-    {OwnerId, _} = mk_user(full),
+    {OwnerName, _, _, _} = mk_user(full),
     ?assertMatch({error, {bad_type, nonsense}},
-                 shurbej_admin:create_group(<<"bad">>, OwnerId, nonsense)),
+                 shurbej_admin:create_group(<<"bad">>, OwnerName, nonsense)),
     ok.
 
 admin_add_member_errors(_Config) ->
-    {OwnerId, _} = mk_user(full),
-    {ok, GroupId} = shurbej_admin:create_group(<<"am">>, OwnerId, private),
+    {OwnerName, _, _, _} = mk_user(full),
+    {ok, GroupId} = shurbej_admin:create_group(<<"am">>, OwnerName, private),
     %% Missing user
     ?assertEqual({error, user_not_found},
-                 shurbej_admin:add_member(GroupId, 99999999, member)),
+                 shurbej_admin:add_member(GroupId, <<"ghost-user-name">>, member)),
     %% Missing group
     ?assertEqual({error, group_not_found},
-                 shurbej_admin:add_member(99999999, OwnerId, member)),
+                 shurbej_admin:add_member(99999999, OwnerName, member)),
     ok.
 
 admin_remove_member_and_lists(_Config) ->
-    {OwnerId, _} = mk_user(full),
-    {MemberId, _} = mk_user(full),
-    {ok, GroupId} = shurbej_admin:create_group(<<"rm">>, OwnerId, private),
-    ok = shurbej_admin:add_member(GroupId, MemberId, member),
+    {OwnerName, _, _, _} = mk_user(full),
+    {MemberName, _, MemberUuid, _} = mk_user(full),
+    {ok, GroupId} = shurbej_admin:create_group(<<"rm">>, OwnerName, private),
+    ok = shurbej_admin:add_member(GroupId, MemberName, member),
+    %% list_members returns [{UserUuid, Role}].
     Members = shurbej_admin:list_members(GroupId),
-    ?assert(lists:keymember(MemberId, 1, Members)),
-    UserGroups = shurbej_admin:list_user_groups(MemberId),
+    ?assert(lists:keymember(MemberUuid, 1, Members)),
+    %% list_user_groups returns {ok, [{GroupId, Role}]}.
+    {ok, UserGroups} = shurbej_admin:list_user_groups(MemberName),
     ?assert(lists:keymember(GroupId, 1, UserGroups)),
-    ok = shurbej_admin:remove_member(GroupId, MemberId),
+    ok = shurbej_admin:remove_member(GroupId, MemberName),
     Members2 = shurbej_admin:list_members(GroupId),
-    ?assertNot(lists:keymember(MemberId, 1, Members2)),
+    ?assertNot(lists:keymember(MemberUuid, 1, Members2)),
     AllGroups = shurbej_admin:list_groups(),
     ?assert(lists:keymember(GroupId, 1, AllGroups)),
     ok.
 
 admin_create_api_key_user_not_found(_Config) ->
     ?assertEqual({error, user_not_found},
-                 shurbej_admin:create_api_key(99999999, <<"nope">>)),
+                 shurbej_admin:create_api_key(<<"ghost-user-name">>, <<"nope">>)),
     ok.
 
 item_delete_cascade_unlinks_blob(Config) ->
@@ -3153,7 +3162,7 @@ login_rate_burst_is_capped(Config) ->
     %% than being serialized by the default httpc connection pool.
     Base = ?config(base, Config),
     Username = <<"burstuser_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
-    ok = shurbej_admin:create_user(Username, <<"rightpw">>),
+    {ok, _} = shurbej_admin:create_user(Username, <<"rightpw">>),
     Parent = self(),
     N = 10,
     %% Gate all spawned workers on a single release signal so they fire as
@@ -3229,9 +3238,9 @@ admin_delete_group_cascades(Config) ->
 admin_create_api_key_read_only(Config) ->
     Uniq = integer_to_binary(erlang:unique_integer([positive])),
     Name = <<"ro_", Uniq/binary>>,
-    ok = shurbej_admin:create_user(Name, <<"pw">>),
-    [UserId] = [I || {N, I} <- shurbej_admin:list_users(), N =:= Name],
-    {ok, Key} = shurbej_admin:create_api_key(UserId, Name, read_only),
+    {ok, _} = shurbej_admin:create_user(Name, <<"pw">>),
+    [UserId] = [I || {N, I, _Uu} <- shurbej_admin:list_users(), N =:= Name],
+    {ok, Key} = shurbej_admin:create_api_key(Name, Name, read_only),
     %% GET /users/:id/items must work; POST must 403.
     Path = "/users/" ++ integer_to_list(UserId) ++ "/items",
     {200, _} = request_with_key(get, Path, [], <<>>, Config, Key),
@@ -3243,21 +3252,24 @@ admin_create_api_key_read_only(Config) ->
 %% Group-perm test helpers
 %% ===================================================================
 
+%% Returns {Username, UserId, UserUuid, ApiKey}.
+%%   Username is the admin-API handle (passed to add_member, create_group).
+%%   UserId is the on-wire integer label (for /users/:userID URLs).
+%%   UserUuid is the storage key (for {user, _} LibRefs and shurbej_db calls).
 mk_user(Access) ->
     Uniq = integer_to_binary(erlang:unique_integer([positive])),
     Name = <<"u_", Uniq/binary>>,
-    ok = shurbej_admin:create_user(Name, <<"pw">>),
-    UserId = case [I || {N, I} <- shurbej_admin:list_users(), N =:= Name] of
-        [Id] -> Id
-    end,
-    {ok, Key} = shurbej_admin:create_api_key(UserId, Name, Access),
-    {UserId, Key}.
+    {ok, UserUuid} = shurbej_admin:create_user(Name, <<"pw">>),
+    {ok, #shurbej_user{user_id = UserId}} =
+        shurbej_db:get_user_by_uuid(UserUuid),
+    {ok, Key} = shurbej_admin:create_api_key(Name, Name, Access),
+    {Name, UserId, UserUuid, Key}.
 
 mk_group(Opts) ->
     Uniq = integer_to_binary(erlang:unique_integer([positive])),
-    {OwnerId, OwnerKey} = mk_user(full),
+    {OwnerName, OwnerId, _OwnerUuid, OwnerKey} = mk_user(full),
     {ok, GroupId} = shurbej_admin:create_group(
-        <<"g_", Uniq/binary>>, OwnerId, private, Opts),
+        <<"g_", Uniq/binary>>, OwnerName, private, Opts),
     {GroupId, OwnerId, OwnerKey}.
 
 request_with_key(Method, Path, ExtraHeaders, ReqBody, Config, ApiKey) ->

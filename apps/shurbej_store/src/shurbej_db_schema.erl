@@ -5,7 +5,7 @@
 
 %% Bump this when records change, keys change shape, or tables get
 %% added/removed in a way that would misalign an older on-disk copy.
--define(SCHEMA_VERSION, 1).
+-define(SCHEMA_VERSION, 2).
 
 current_version() -> ?SCHEMA_VERSION.
 
@@ -43,9 +43,10 @@ ensure_tables() ->
         {shurbej_fulltext, record_info(fields, shurbej_fulltext), set, []},
         {shurbej_file_meta, record_info(fields, shurbej_file_meta), set, []},
         {shurbej_blob, record_info(fields, shurbej_blob), set, []},
-        {shurbej_user, record_info(fields, shurbej_user), set, []},
+        {shurbej_user, record_info(fields, shurbej_user), set, [user_id, username]},
+        {shurbej_identity, record_info(fields, shurbej_identity), set, [user_uuid]},
         {shurbej_item_collection, record_info(fields, shurbej_item_collection), bag, []},
-        {shurbej_group, record_info(fields, shurbej_group), set, [owner_id]},
+        {shurbej_group, record_info(fields, shurbej_group), set, [owner_uuid]},
         {shurbej_group_member, record_info(fields, shurbej_group_member), set, []}
     ],
     lists:foreach(fun({Name, Fields, Type, Indices}) ->
@@ -63,7 +64,7 @@ ensure_tables() ->
         [shurbej_schema_meta, shurbej_library, shurbej_api_key, shurbej_item,
          shurbej_collection, shurbej_search, shurbej_tag, shurbej_setting,
          shurbej_deleted, shurbej_fulltext, shurbej_file_meta, shurbej_blob,
-         shurbej_user, shurbej_item_collection, shurbej_group,
+         shurbej_user, shurbej_identity, shurbej_item_collection, shurbej_group,
          shurbej_group_member],
         5000
     ).
@@ -93,7 +94,7 @@ check_users() ->
     case mnesia:dirty_first(shurbej_user) of
         '$end_of_table' ->
             logger:notice("no users configured. "
-                          "Create one with: shurbej_admin:create_user(<<\"username\">>, <<\"password\">>, 1).");
+                          "Create one with: shurbej_admin:create_user(<<\"username\">>, <<\"password\">>).");
         _ ->
             ok
     end.
